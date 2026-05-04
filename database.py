@@ -1,0 +1,174 @@
+import json
+import logging
+
+import pandas as pd
+from sqlalchemy import create_engine, text
+
+from config import settings
+
+logger = logging.getLogger(__name__)
+
+engine = create_engine(
+    settings.DATABASE_URL,
+    pool_size=5,
+    max_overflow=10,
+    pool_pre_ping=True,
+    echo=settings.ENVIRONMENT == "development",
+)
+
+
+def init_db() -> None:
+    """Crea la tabla historial_optimizacion si no existe."""
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS historial_optimizacion (
+                id               BIGSERIAL PRIMARY KEY,
+                fecha_ejecucion  TIMESTAMP NOT NULL DEFAULT NOW(),
+                estado_solucion  VARCHAR(30) NOT NULL,
+                utilidad_total   NUMERIC(15, 2),
+                talla            VARCHAR(10) NOT NULL DEFAULT 'M',
+                x1_pantalon_diario INTEGER DEFAULT 0,
+                x2_camisa_diario   INTEGER DEFAULT 0,
+                x3_pantalon_ef     INTEGER DEFAULT 0,
+                x4_sueter_ef       INTEGER DEFAULT 0,
+                stocks_usados      JSONB,
+                parametros_entrada JSONB,
+                grafica_html        TEXT,
+                grafica_region_html TEXT,
+                ejecutado_por       VARCHAR(50),
+                mensaje             TEXT,
+                created_at          TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        # Migración no destructiva: agrega columna si la tabla ya existía sin ella
+        conn.execute(text("""
+            ALTER TABLE historial_optimizacion
+            ADD COLUMN IF NOT EXISTS grafica_region_html TEXT
+        """))
+        conn.commit()
+    logger.info("Tabla historial_optimizacion lista")
+
+
+def obtener_coeficientes(talla: str = "M") -> pd.DataFrame:
+    """
+    Retorna los coeficientes de insumo por prenda desde uniforme_insumos.
+    Columnas: prenda, tipo, insumo_nombre, cantidad_base, stock_actual, insumo_id
+    """
+    query = text("""
+        SELECT
+            u.prenda,
+            u.tipo,
+            LOWER(i.nombre)  AS insumo_nombre,
+            ui.cantidad_base,
+            ui.unidad_medida,
+            i.stock           AS stock_actual,
+            i.id              AS insumo_id
+        FROM uniforme_insumos ui
+        JOIN uniformes u ON ui.uniforme_id = u.id
+        JOIN insumos   i ON ui.insumo_id   = i.id
+        WHERE ui.talla = :talla
+        ORDER BY u.prenda, i.nombre
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn, params={"talla": talla})
+
+
+def obtener_stocks_insumos() -> pd.DataFrame:
+    """Lee todos los insumos con su stock actual para usar como fallback de stocks."""
+    query = text("""
+        SELECT id, nombre, LOWER(nombre) AS nombre_lower, stock, stock_minimo, unidad_medida
+        FROM insumos
+        ORDER BY nombre
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn)
+
+
+def obtener_demanda_uniforme(talla: str = "M") -> pd.DataFrame:
+    """
+    Suma la demanda de pedidos activos (BORRADOR → EN_PRODUCCION) por prenda/tipo.
+    """
+    query = text("""
+        SELECT
+            u.prenda,
+            u.tipo,
+            COALESCE(SUM(dp.cantidad), 0) AS cantidad_demandada
+        FROM uniformes u
+        LEFT JOIN detalle_pedidos dp ON dp.uniforme_id = u.id
+            AND dp.talla = :talla
+        LEFT JOIN pedidos p ON dp.pedido_id = p.id
+            AND p.estado IN ('BORRADOR', 'CALCULADO', 'CONFIRMADO', 'EN_PRODUCCION')
+        GROUP BY u.prenda, u.tipo
+        ORDER BY u.prenda
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn, params={"talla": talla})
+
+
+def guardar_historial(resultado: dict) -> int | None:
+    """Persiste el resultado de una ejecución en historial_optimizacion."""
+    plan = resultado.get("plan") or {}
+    if hasattr(plan, "model_dump"):
+        plan = plan.model_dump()
+
+    query = text("""
+        INSERT INTO historial_optimizacion (
+            fecha_ejecucion, estado_solucion, utilidad_total, talla,
+            x1_pantalon_diario, x2_camisa_diario, x3_pantalon_ef, x4_sueter_ef,
+            stocks_usados, parametros_entrada, grafica_html, grafica_region_html, ejecutado_por, mensaje
+        ) VALUES (
+            NOW(), :estado, :utilidad, :talla,
+            :x1, :x2, :x3, :x4,
+            CAST(:stocks AS jsonb), CAST(:params AS jsonb), :grafica, :grafica_region, :usuario, :mensaje
+        ) RETURNING id
+    """)
+    recursos = resultado.get("recursos") or {}
+    recursos_serial = {
+        k: (v.model_dump() if hasattr(v, "model_dump") else v)
+        for k, v in recursos.items()
+    }
+
+    with engine.connect() as conn:
+        row = conn.execute(query, {
+            "estado":   resultado.get("estado", "ERROR"),
+            "utilidad": resultado.get("utilidad_total"),
+            "talla":    resultado.get("talla", "M"),
+            "x1": plan.get("pantalon_diario", 0),
+            "x2": plan.get("camisa_diario", 0),
+            "x3": plan.get("pantalon_ef", 0),
+            "x4": plan.get("sueter_ef", 0),
+            "stocks":  json.dumps(recursos_serial),
+            "params":  json.dumps(resultado.get("parametros", {})),
+            "grafica": resultado.get("grafica_html"),
+            "grafica_region": resultado.get("grafica_region_html"),
+            "usuario": resultado.get("ejecutado_por"),
+            "mensaje": resultado.get("mensaje"),
+        }).fetchone()
+        conn.commit()
+        return row[0] if row else None
+
+
+def obtener_historial(limit: int = 20) -> pd.DataFrame:
+    query = text("""
+        SELECT id, fecha_ejecucion, estado_solucion, utilidad_total, talla,
+               x1_pantalon_diario, x2_camisa_diario, x3_pantalon_ef, x4_sueter_ef,
+               mensaje, created_at
+        FROM historial_optimizacion
+        ORDER BY created_at DESC
+        LIMIT :limit
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn, params={"limit": limit})
+
+
+def obtener_historial_por_id(record_id: int) -> dict | None:
+    query = text("""
+        SELECT id, fecha_ejecucion, estado_solucion, utilidad_total, talla,
+               x1_pantalon_diario, x2_camisa_diario, x3_pantalon_ef, x4_sueter_ef,
+               stocks_usados, parametros_entrada, grafica_html, grafica_region_html, mensaje, created_at
+        FROM historial_optimizacion
+        WHERE id = :id
+    """)
+    with engine.connect() as conn:
+        row = conn.execute(query, {"id": record_id}).fetchone()
+        return dict(row._mapping) if row else None
