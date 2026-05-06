@@ -13,24 +13,24 @@ Microservicio de optimización semanal de producción para CostuSoft. Resuelve e
 
 ## Endpoints
 
-| Método | Ruta | Descripción |
-|--------|------|-------------|
-| `GET` | `/health` | Estado del servicio |
-| `POST` | `/optimizar` | Ejecuta el modelo ILP y retorna el plan óptimo |
-| `GET` | `/historial` | Últimas N ejecuciones del optimizador |
-| `GET` | `/historial/{id}` | Detalle de una ejecución específica |
-| `GET` | `/historial/{id}/pdf` | Descarga el PDF del resultado |
+| Método | Ruta                  | Descripción                                    |
+| ------ | --------------------- | ---------------------------------------------- |
+| `GET`  | `/health`             | Estado del servicio                            |
+| `POST` | `/optimizar`          | Ejecuta el modelo ILP y retorna el plan óptimo |
+| `GET`  | `/historial`          | Últimas N ejecuciones del optimizador          |
+| `GET`  | `/historial/{id}`     | Detalle de una ejecución específica            |
+| `GET`  | `/historial/{id}/pdf` | Descarga el PDF del resultado                  |
 
 Todos los endpoints (excepto `/health`) requieren el header `X-API-Token`.
 
 ## Variables de entorno
 
-| Variable | Descripción | Default |
-|----------|-------------|---------|
-| `DATABASE_URL` | URL de conexión a PostgreSQL (Supabase) | — |
-| `API_SECRET_TOKEN` | Token interno compartido con el backend | — |
-| `ENVIRONMENT` | `production` / `development` | `development` |
-| `PORT` | Puerto del servidor (Render lo inyecta automáticamente) | `8002` |
+| Variable           | Descripción                                             | Default       |
+| ------------------ | ------------------------------------------------------- | ------------- |
+| `DATABASE_URL`     | URL de conexión a PostgreSQL (Supabase)                 | —             |
+| `API_SECRET_TOKEN` | Token interno compartido con el backend                 | —             |
+| `ENVIRONMENT`      | `production` / `development`                            | `development` |
+| `PORT`             | Puerto del servidor (Render lo inyecta automáticamente) | `8002`        |
 
 ## Desarrollo local
 

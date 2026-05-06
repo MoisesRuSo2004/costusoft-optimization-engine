@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +24,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    logger.info("Optimizacion Service listo en puerto %d", settings.PORT)
+    yield
+
+
 app = FastAPI(
     title="Optimizacion Service",
     description=(
@@ -31,6 +40,7 @@ app = FastAPI(
         "Stack: FastAPI + PuLP + CBC + Plotly."
     ),
     version="1.0.0",
+    lifespan=lifespan,
     docs_url="/docs" if settings.ENVIRONMENT == "development" else None,
 )
 
@@ -52,13 +62,6 @@ async def verificar_token(token: str = Depends(_api_key_header)) -> str:
             detail="Token inválido o ausente",
         )
     return token
-
-
-# ── Eventos ───────────────────────────────────────────────────────────────
-@app.on_event("startup")
-async def startup() -> None:
-    init_db()
-    logger.info("Optimizacion Service listo en puerto %d", settings.PORT)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────
@@ -83,7 +86,7 @@ def optimizar(
     - Genera gráfica Plotly interactiva embebible en el dashboard.
     - Persiste el resultado en `historial_optimizacion`.
     """
-    logger.info("Ejecutando optimización — talla=%s, incluir_demanda=%s", params.talla, params.incluir_demanda)
+    logger.info("Ejecutando optimización — incluir_demanda=%s, ejecutado_por=%s", params.incluir_demanda, params.ejecutado_por)
 
     output: OptimizadorOutput = resolver_optimizacion(params)
     resultado = output.resultado
@@ -94,7 +97,6 @@ def optimizar(
             coef_matrix=output.coef_matrix,
             stocks=output.stocks,
             plan=resultado.plan,
-            talla=resultado.talla,
         )
 
     datos_historial = resultado.model_dump()

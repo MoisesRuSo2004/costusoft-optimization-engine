@@ -7,6 +7,7 @@ import base64
 import io
 import json
 import logging
+import os
 import re
 from datetime import datetime
 
@@ -17,26 +18,37 @@ from fpdf import FPDF
 
 logger = logging.getLogger(__name__)
 
+_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+_LOGO_PATH  = os.path.join(_ASSETS_DIR, "logo.png")   # white-on-transparent PNG
+
 NOMBRES_PRENDAS = {
     "pantalon_diario": "Pantalon Diario",
     "camisa_diario":   "Camisa Diaria",
+    "sueter_diario":   "Sueter Diario",
     "pantalon_ef":     "Pantalon E.F.",
     "sueter_ef":       "Sueter E.F.",
 }
 NOMBRES_INSUMOS = {
-    "drill":    "Tela Drill",
-    "popelina": "Tela Popelina",
-    "licra":    "Tela Licra",
-    "hilo":     "Hilo",
-    "botones":  "Botones",
+    "drill":      "Tela Drill",
+    "popelina":   "Tela Popelina",
+    "licra":      "Tela Licra",
+    "lana":       "Tela Lana",
+    "hilo":       "Hilo",
+    "botones":    "Botones",
+    "entretela":  "Entretela",
+    "cierres":    "Cierres",
+    "elastico":   "Elastico",
+    "cinta":      "Cinta",
+    "etiquetas":  "Etiquetas",
 }
 UTILIDADES = {
     "pantalon_diario": 20_000,
     "camisa_diario":   15_000,
+    "sueter_diario":   13_000,
     "pantalon_ef":     12_000,
     "sueter_ef":       11_000,
 }
-COLORES_PLAN = ["#2563EB", "#7C3AED", "#059669", "#D97706"]
+COLORES_PLAN = ["#2563EB", "#7C3AED", "#EC4899", "#059669", "#D97706"]
 PLAN_KEYS = list(NOMBRES_PRENDAS.keys())
 
 
@@ -45,22 +57,25 @@ PLAN_KEYS = list(NOMBRES_PRENDAS.keys())
 def _img_plan(plan: dict, utilidad: float) -> bytes:
     labels = [NOMBRES_PRENDAS[k] for k in PLAN_KEYS]
     values = [plan.get(k, 0) for k in PLAN_KEYS]
+    colors = COLORES_PLAN[: len(labels)]          # siempre mismo largo que las barras
 
-    fig, ax = plt.subplots(figsize=(9, 4))
-    bars = ax.bar(labels, values, color=COLORES_PLAN, edgecolor="white", linewidth=1.5, width=0.55)
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    bars = ax.bar(labels, values, color=colors, edgecolor="white", linewidth=1.5, width=0.55)
 
+    max_val = max(values + [1])
     for bar, val in zip(bars, values):
         if val > 0:
             ax.text(
                 bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + max(values) * 0.02,
+                bar.get_height() + max_val * 0.02,
                 str(val), ha="center", va="bottom", fontweight="bold", fontsize=11,
             )
 
-    ax.set_title(f"Plan de Produccion - Utilidad: ${utilidad:,.0f} COP",
+    ax.set_title(f"Plan de Produccion - Utilidad Maxima: ${utilidad:,.0f} COP",
                  fontsize=12, fontweight="bold", pad=14)
-    ax.set_ylabel("Unidades", fontsize=10)
-    ax.set_ylim(0, max(values + [1]) * 1.18)
+    ax.set_ylabel("Unidades a producir", fontsize=10)
+    ax.set_ylim(0, max_val * 1.22)
+    ax.tick_params(axis="x", labelsize=9)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.set_facecolor("#F9FAFB")
@@ -91,11 +106,13 @@ def _img_recursos(recursos: dict) -> bytes | None:
     if not recursos:
         return None
 
-    labels = [NOMBRES_INSUMOS.get(k, k.title()) for k in recursos]
-    pcts = [
-        (v.get("utilizacion_pct", 0) if isinstance(v, dict) else 0)
-        for v in recursos.values()
+    def _rv(r, field, default=0):
+        return r.get(field, default) if isinstance(r, dict) else getattr(r, field, default)
+    labels = [
+        f"{NOMBRES_INSUMOS.get(k, k.title())} ({_rv(v, 'unidad_medida', 'un') or 'un'})"
+        for k, v in recursos.items()
     ]
+    pcts = [_rv(v, "utilizacion_pct", 0) for v in recursos.values()]
     colors = ["#EF4444" if p >= 95 else "#F59E0B" if p >= 75 else "#10B981" for p in pcts]
 
     fig, ax = plt.subplots(figsize=(9, max(3, len(labels) * 0.7 + 1.5)))
@@ -126,29 +143,92 @@ def _img_recursos(recursos: dict) -> bytes | None:
 
 # ── FPDF class ────────────────────────────────────────────────────────────────
 
-class _PDF(FPDF):
-    def header(self):
-        self.set_fill_color(11, 61, 145)
-        self.rect(0, 0, 210, 26, "F")
-        self.set_font("Helvetica", "B", 17)
-        self.set_text_color(255, 255, 255)
-        self.set_xy(10, 7)
-        self.cell(100, 9, "CostuSoft Control", ln=False)
-        self.set_font("Helvetica", "", 9)
-        self.set_xy(10, 17)
-        self.cell(0, 5, "Taller de Confecciones La Senora Piedad - Cartagena")
-        self.set_text_color(0, 0, 0)
-        self.ln(20)
+_HEADER_H   = 32   # mm — total header height
+_LOGO_W     = 30   # mm — logo width (auto height ~23mm with 1.28 aspect)
+_BLUE_DARK  = (11,  61, 145)   # #0B3D91
+_BLUE_MID   = (30,  90, 190)   # accent stripe
+_GOLD       = (217, 143,  20)  # decorative stripe
+_GREY_TEXT  = (120, 130, 148)
 
+
+class _PDF(FPDF):
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    def header(self):
+        # --- background rectangle (full width) ---
+        self.set_fill_color(*_BLUE_DARK)
+        self.rect(0, 0, 210, _HEADER_H, "F")
+
+        # --- gold accent stripe at bottom of header ---
+        self.set_fill_color(*_GOLD)
+        self.rect(0, _HEADER_H - 2, 210, 2, "F")
+
+        # --- logo (left zone, white-on-transparent PNG, vertically centered) ---
+        # Logo aspect ratio is ~1.28 wide:tall; at w=30mm → h≈23mm → center in 32mm header
+        logo_y = (_HEADER_H - 23) / 2
+        has_logo = os.path.isfile(_LOGO_PATH)
+        if has_logo:
+            try:
+                self.image(_LOGO_PATH, x=6, y=logo_y, w=_LOGO_W)
+            except Exception:
+                has_logo = False
+        if not has_logo:
+            # fallback: styled text badge
+            self.set_font("Helvetica", "B", 14)
+            self.set_text_color(255, 255, 255)
+            self.set_xy(6, 10)
+            self.cell(_LOGO_W, 12, "CostuSoft", align="C")
+
+        # --- vertical separator ---
+        sep_x = 6 + _LOGO_W + 4
+        self.set_draw_color(255, 255, 255)
+        self.set_line_width(0.4)
+        self.line(sep_x, 5, sep_x, _HEADER_H - 4)
+
+        # --- title block (center-right zone) ---
+        txt_x = sep_x + 4
+        self.set_font("Helvetica", "B", 15)
+        self.set_text_color(255, 255, 255)
+        self.set_xy(txt_x, 7)
+        self.cell(0, 8, "CostuSoft Control", ln=True)
+
+        self.set_font("Helvetica", "", 8)
+        self.set_text_color(200, 215, 240)
+        self.set_xy(txt_x, 16)
+        self.cell(0, 5, "Taller de Confecciones La Senora Piedad  -  Cartagena, Colombia")
+
+        # --- page number (bottom-right corner) ---
+        self.set_font("Helvetica", "", 7)
+        self.set_text_color(180, 200, 240)
+        self.set_xy(150, 25)
+        self.cell(55, 5, f"Pagina {self.page_no()}", align="R")
+
+        self.set_text_color(0, 0, 0)
+        self.ln(_HEADER_H + 2)
+
+    # ── Footer ────────────────────────────────────────────────────────────────
     def footer(self):
-        self.set_y(-13)
-        self.set_font("Helvetica", "I", 7)
-        self.set_text_color(160, 160, 160)
-        self.cell(
-            0, 8,
-            f"Pagina {self.page_no()}  |  Reporte generado automaticamente  |  Motor ILP (PuLP + CBC)",
-            align="C",
-        )
+        # thin gold line separator
+        self.set_draw_color(*_GOLD)
+        self.set_line_width(0.6)
+        self.line(10, self.h - 14, 200, self.h - 14)
+
+        self.set_y(self.h - 12)
+
+        # left: company
+        self.set_font("Helvetica", "", 7)
+        self.set_text_color(*_GREY_TEXT)
+        self.cell(70, 6, "CostuSoft  -  Sistema de Gestion de Produccion", align="L")
+
+        # center: page
+        self.set_font("Helvetica", "B", 7)
+        self.set_text_color(*_BLUE_DARK)
+        self.cell(70, 6, f"Pagina  {self.page_no()}", align="C")
+
+        # right: motor info
+        self.set_font("Helvetica", "I", 6.5)
+        self.set_text_color(*_GREY_TEXT)
+        self.cell(60, 6, "Motor ILP: PuLP + CBC (Optimizacion Exacta)", align="R")
 
 
     # helpers
@@ -192,14 +272,14 @@ def generar_pdf_optimizacion(item: dict) -> bytes:
     plan = {
         "pantalon_diario": item.get("x1_pantalon_diario") or 0,
         "camisa_diario":   item.get("x2_camisa_diario")   or 0,
+        "sueter_diario":   item.get("x5_sueter_diario")   or 0,
         "pantalon_ef":     item.get("x3_pantalon_ef")     or 0,
         "sueter_ef":       item.get("x4_sueter_ef")       or 0,
     }
     utilidad     = float(item.get("utilidad_total") or 0)
-    estado       = str(item.get("estado_solucion") or "—")
-    talla        = str(item.get("talla") or "M")
+    estado       = str(item.get("estado_solucion") or "-")
     mensaje      = str(item.get("mensaje") or "")
-    record_id    = item.get("id", "—")
+    record_id    = item.get("id", "-")
     total_prendas = sum(plan.values())
 
     fecha = item.get("fecha_ejecucion") or item.get("created_at") or datetime.now()
@@ -218,7 +298,7 @@ def generar_pdf_optimizacion(item: dict) -> bytes:
     pdf.cell(0, 9, "Reporte de Optimizacion de Produccion", ln=True)
     pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(107, 114, 128)
-    pdf.cell(0, 6, f"Fecha: {fecha_str}   |   ID #{record_id}   |   Talla: {talla}", ln=True)
+    pdf.cell(0, 6, f"Fecha: {fecha_str}   |   ID #{record_id}   |   Todas las tallas", ln=True)
     pdf.set_text_color(17, 24, 39)
     pdf.ln(3)
 
@@ -269,64 +349,78 @@ def generar_pdf_optimizacion(item: dict) -> bytes:
     # ── Recursos ──────────────────────────────────────────────────────
     if stocks_usados:
         pdf.section_title("Utilizacion de Insumos")
-        pdf.th([60, 30, 35, 35, 30], ["Insumo", "Usado", "Disponible", "Holgura", "Uso %"])
+        pdf.th([55, 18, 28, 30, 30, 29], ["Insumo", "Ud.", "Usado", "Disponible", "Holgura", "Uso %"])
         for i, (key, rec) in enumerate(stocks_usados.items()):
             if not isinstance(rec, dict):
                 continue
-            pct = rec.get("utilizacion_pct", 0)
+            pct   = rec.get("utilizacion_pct", 0)
+            udm   = rec.get("unidad_medida", "un") or "un"
             pdf.set_fill_color(249, 250, 251) if i % 2 else pdf.set_fill_color(255, 255, 255)
             pdf.set_font("Helvetica", "", 9)
             for w, v, a in zip(
-                [60, 30, 35, 35],
-                [NOMBRES_INSUMOS.get(key, key.title()), rec.get("usado", 0),
-                 rec.get("disponible", 0), rec.get("holgura", 0)],
-                ["L", "C", "C", "C"],
+                [55, 18, 28, 30, 30],
+                [NOMBRES_INSUMOS.get(key, key.title()), udm,
+                 rec.get("usado", 0), rec.get("disponible", 0), rec.get("holgura", 0)],
+                ["L", "C", "C", "C", "C"],
             ):
                 pdf.cell(w, 8, str(v), fill=True, border=0, align=a)
             c = (220, 38, 38) if pct >= 95 else (217, 119, 6) if pct >= 75 else (5, 150, 105)
             pdf.set_text_color(*c)
             pdf.set_font("Helvetica", "B", 9)
-            pdf.cell(30, 8, f"{pct:.1f}%", fill=True, border=0, align="C")
+            pdf.cell(29, 8, f"{pct:.1f}%", fill=True, border=0, align="C")
             pdf.set_text_color(17, 24, 39)
             pdf.ln()
         pdf.ln(8)
 
     # ── Gráficas ──────────────────────────────────────────────────────
+    # Gráfica 1: Plan de producción
     try:
-        pdf.section_title("Grafica — Plan de Produccion")
         img_bytes = _img_plan(plan, utilidad)
-        pdf.image(io.BytesIO(img_bytes), x=10, w=190)
-        pdf.ln(6)
+        pdf.add_page()
+        pdf.section_title("Grafica - Plan de Produccion")
+        buf = io.BytesIO(img_bytes)
+        buf.seek(0)
+        pdf.image(buf, x=10, w=190)
+        pdf.ln(4)
     except Exception as e:
-        logger.warning("No se pudo generar grafica plan: %s", e)
+        logger.error("Error generando grafica plan en PDF: %s", e, exc_info=True)
 
+    # Gráfica 2: Utilización de insumos
     if stocks_usados:
         try:
             img_rec = _img_recursos(stocks_usados)
             if img_rec:
-                pdf.section_title("Grafica — Utilizacion de Insumos")
-                pdf.image(io.BytesIO(img_rec), x=10, w=190)
+                pdf.add_page()
+                pdf.section_title("Grafica - Utilizacion de Insumos")
+                buf_rec = io.BytesIO(img_rec)
+                buf_rec.seek(0)
+                pdf.image(buf_rec, x=10, w=190)
+                pdf.ln(4)
         except Exception as e:
-            logger.warning("No se pudo generar grafica recursos: %s", e)
+            logger.error("Error generando grafica recursos en PDF: %s", e, exc_info=True)
 
-    # Region factible (metodo grafico PL)
+    # Gráfica 3: Región factible (método gráfico PL)
     try:
         img_region = _img_region_factible_from_html(grafica_region_html)
         if img_region:
             pdf.add_page()
-            pdf.section_title("Grafica — Region Factible (Metodo Grafico PL)")
+            pdf.section_title("Grafica - Region Factible (Metodo Grafico PL)")
             pdf.set_font("Helvetica", "", 8)
             pdf.set_text_color(107, 114, 128)
             pdf.multi_cell(
                 0, 5,
                 "Proyeccion bidimensional (x1=Pantalon Diario, x2=Camisa Diaria) "
-                "con x3 y x4 fijados en sus valores optimos. "
+                "con Sueter Diario, Pantalon EF y Sueter EF fijados en sus valores optimos. "
                 "Area azul = region factible. Punto rojo = solucion optima.",
             )
             pdf.set_text_color(17, 24, 39)
             pdf.ln(3)
-            pdf.image(io.BytesIO(img_region), x=10, w=190)
+            buf_reg = io.BytesIO(img_region)
+            buf_reg.seek(0)
+            pdf.image(buf_reg, x=10, w=190)
+        else:
+            logger.warning("grafica_region_html vacio o sin datos base64 - omitiendo del PDF")
     except Exception as e:
-        logger.warning("No se pudo incluir grafica region factible en PDF: %s", e)
+        logger.error("Error incluyendo region factible en PDF: %s", e, exc_info=True)
 
     return bytes(pdf.output())

@@ -4,8 +4,7 @@ from datetime import datetime
 
 
 class ParametrosOptimizacion(BaseModel):
-    talla: str = Field(default="M", description="Talla de uniforme a optimizar")
-    incluir_demanda: bool = Field(default=True, description="Aplica restricciones de demanda desde pedidos activos")
+    incluir_demanda: bool = Field(default=True, description="Aplica restricciones de demanda desde pedidos activos (suma todas las tallas)")
     utilidades: Optional[dict[str, float]] = Field(
         default=None,
         description="Override de utilidades por prenda en COP. Defaults: pantalon_diario=20000, camisa_diario=15000, pantalon_ef=12000, sueter_ef=11000"
@@ -16,6 +15,7 @@ class ParametrosOptimizacion(BaseModel):
 class PlanProduccion(BaseModel):
     pantalon_diario: int = 0
     camisa_diario: int = 0
+    sueter_diario: int = 0
     pantalon_ef: int = 0
     sueter_ef: int = 0
 
@@ -25,6 +25,7 @@ class RecursoInfo(BaseModel):
     disponible: float
     holgura: float
     utilizacion_pct: float
+    unidad_medida: str = ""
 
 
 class DemandaInfo(BaseModel):
@@ -39,7 +40,6 @@ class ResultadoOptimizacion(BaseModel):
     plan: PlanProduccion
     recursos: dict[str, RecursoInfo]
     demanda: dict[str, DemandaInfo]
-    talla: str = "M"
     mensaje: str
     grafica_html: Optional[str] = None
     grafica_region_html: Optional[str] = None

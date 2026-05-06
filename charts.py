@@ -18,23 +18,31 @@ from plotly.subplots import make_subplots
 NOMBRES_PRENDAS = {
     "pantalon_diario": "Pantalón Diario",
     "camisa_diario":   "Camisa Diaria",
+    "sueter_diario":   "Suéter Diario",
     "pantalon_ef":     "Pantalón E.F.",
     "sueter_ef":       "Suéter E.F.",
 }
 
 NOMBRES_INSUMOS = {
-    "drill":    "Tela Drill",
-    "popelina": "Tela Popelina",
-    "licra":    "Tela Licra",
-    "hilo":     "Hilo",
-    "botones":  "Botones",
+    "drill":      "Tela Drill",
+    "popelina":   "Tela Popelina",
+    "licra":      "Tela Licra",
+    "lana":       "Tela Lana",
+    "hilo":       "Hilo",
+    "botones":    "Botones",
+    "entretela":  "Entretela",
+    "cierres":    "Cierres",
+    "elastico":   "Elástico",
+    "cinta":      "Cinta",
+    "etiquetas":  "Etiquetas",
 }
 
-COLORES_PLAN = ["#2563EB", "#7C3AED", "#059669", "#D97706"]
+COLORES_PLAN = ["#2563EB", "#7C3AED", "#EC4899", "#059669", "#D97706"]
 
 UTILIDADES_ILP = {
     "pantalon_diario": 20_000,
     "camisa_diario":   15_000,
+    "sueter_diario":   13_000,
     "pantalon_ef":     12_000,
     "sueter_ef":       11_000,
 }
@@ -47,7 +55,6 @@ def generar_grafica_optimizacion(resultado: dict) -> str:
 
     recursos = resultado.get("recursos") or {}
 
-    talla = resultado.get("talla", "M")
     utilidad = resultado.get("utilidad_total", 0)
 
     # ── Datos del plan de producción ─────────────────────────────────────
@@ -56,10 +63,15 @@ def generar_grafica_optimizacion(resultado: dict) -> str:
 
     # ── Datos de utilización de recursos ─────────────────────────────────
     rec_keys   = list(recursos.keys())
-    rec_labels = [NOMBRES_INSUMOS.get(k, k.title()) for k in rec_keys]
-    rec_used   = [recursos[k].get("usado", 0) if isinstance(recursos[k], dict) else recursos[k].usado for k in rec_keys]
-    rec_avail  = [recursos[k].get("disponible", 0) if isinstance(recursos[k], dict) else recursos[k].disponible for k in rec_keys]
-    rec_pct    = [recursos[k].get("utilizacion_pct", 0) if isinstance(recursos[k], dict) else recursos[k].utilizacion_pct for k in rec_keys]
+    def _rv(r, field, default=0):
+        return r.get(field, default) if isinstance(r, dict) else getattr(r, field, default)
+    rec_labels = [
+        f"{NOMBRES_INSUMOS.get(k, k.title())} ({_rv(recursos[k], 'unidad_medida', 'un') or 'un'})"
+        for k in rec_keys
+    ]
+    rec_used   = [_rv(recursos[k], "usado")          for k in rec_keys]
+    rec_avail  = [_rv(recursos[k], "disponible")      for k in rec_keys]
+    rec_pct    = [_rv(recursos[k], "utilizacion_pct") for k in rec_keys]
 
     def color_pct(p: float) -> str:
         if p >= 95:
@@ -124,10 +136,7 @@ def generar_grafica_optimizacion(resultado: dict) -> str:
 
     fig.update_layout(
         title={
-            "text": (
-                f"Optimización de Producción — Talla {talla} | "
-                f"Utilidad: <b>${utilidad:,.0f} COP</b>"
-            ),
+            "text": f"Optimización de Producción | Utilidad: <b>${utilidad:,.0f} COP</b>",
             "x": 0.5,
             "font": {"size": 14, "family": "Inter, system-ui, sans-serif", "color": "#111827"},
         },
@@ -165,18 +174,24 @@ def generar_grafica_optimizacion(resultado: dict) -> str:
 
 _PALETTE = ["#DC2626", "#16A34A", "#D97706", "#7C3AED", "#0891B2", "#DB2777"]
 _INS_LABELS = {
-    "drill":    "Tela Drill",
-    "popelina": "Tela Popelina",
-    "licra":    "Tela Licra",
-    "hilo":     "Hilo",
-    "botones":  "Botones",
+    "drill":     "Tela Drill",
+    "popelina":  "Tela Popelina",
+    "licra":     "Tela Licra",
+    "lana":      "Tela Lana",
+    "hilo":      "Hilo",
+    "botones":   "Botones",
+    "entretela": "Entretela",
+    "cierres":   "Cierres",
+    "elastico":  "Elástico",
+    "cinta":     "Cinta",
+    "etiquetas": "Etiquetas",
 }
 
 
-def _build_region_png(coef_matrix: dict, stocks: dict, plan: dict, talla: str) -> bytes:
+def _build_region_png(coef_matrix: dict, stocks: dict, plan: dict) -> bytes:
     """Genera la imagen PNG de la región factible proyectada en (x1=pantalon_diario, x2=camisa_diario)."""
     VAR_X, VAR_Y = "pantalon_diario", "camisa_diario"
-    FIXED = ["pantalon_ef", "sueter_ef"]
+    FIXED = ["sueter_diario", "pantalon_ef", "sueter_ef"]
 
     plan_d = plan if isinstance(plan, dict) else (plan.model_dump() if hasattr(plan, "model_dump") else {})
 
@@ -275,9 +290,9 @@ def _build_region_png(coef_matrix: dict, stocks: dict, plan: dict, talla: str) -
     ax.set_xlabel("x₁  =  Pantalón Diario (unidades)", fontsize=11)
     ax.set_ylabel("x₂  =  Camisa Diaria (unidades)", fontsize=11)
     ax.set_title(
-        f"Región Factible — Método Gráfico PL\n"
-        f"Talla {talla}  |  Proyección (x₁, x₂)  con  x₃, x₄ fijos en óptimo",
-        fontsize=12, fontweight="bold", pad=14,
+        "Región Factible — Método Gráfico PL\n"
+        "Proyección (x₁=Pant. Diario, x₂=Camisa)  |  x₃, x₄, x₅ fijos en óptimo",
+        fontsize=11, fontweight="bold", pad=14,
     )
     ax.legend(loc="upper right", fontsize=8.5, framealpha=0.92, edgecolor="#D1D5DB")
     ax.grid(True, alpha=0.22, linestyle="--", color="#9CA3AF")
@@ -294,10 +309,9 @@ def generar_grafica_region_factible_html(
     coef_matrix: dict,
     stocks: dict,
     plan: dict,
-    talla: str,
 ) -> str:
     """Retorna un HTML completo con la imagen de región factible como base64 PNG (apto para iframe srcDoc)."""
-    png_bytes = _build_region_png(coef_matrix, stocks, plan, talla)
+    png_bytes = _build_region_png(coef_matrix, stocks, plan)
     img_b64 = base64.b64encode(png_bytes).decode()
     return (
         '<!DOCTYPE html><html><head><meta charset="utf-8">'
