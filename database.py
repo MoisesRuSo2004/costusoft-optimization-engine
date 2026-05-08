@@ -195,7 +195,8 @@ def obtener_historial_por_id_para_pdf(record_id: int) -> dict | None:
         SELECT id, fecha_ejecucion, estado_solucion, utilidad_total,
                x1_pantalon_diario, x2_camisa_diario, x3_pantalon_ef, x4_sueter_ef,
                COALESCE(x5_sueter_diario, 0) AS x5_sueter_diario,
-               stocks_usados, mensaje, created_at
+               stocks_usados, mensaje, created_at,
+               grafica_region_html
         FROM historial_optimizacion
         WHERE id = :id
     """)

@@ -1,15 +1,21 @@
 """
 Genera un PDF profesional del resultado de optimización.
 Stack: fpdf2 (layout) + PNG base64 almacenado en BD (sin regenerar matplotlib).
-Nota: las gráficas de plan y recursos se muestran como tablas para evitar OOM
-en Render free tier (512 MB). Solo se incluye la región factible, cuyo PNG
-ya está guardado en historial_optimizacion.grafica_region_html.
+
+Estrategia de memoria (Render free tier 512 MB):
+- Plan y recursos: tablas de texto (cero matplotlib).
+- Región factible: PNG ya generado en /optimizar y guardado en BD como base64
+  dentro de grafica_region_html. Solo extraemos el string y lo decodificamos
+  con base64 → BytesIO. Pillow carga ~1 MB descomprimido: sin riesgo de OOM.
+- NO se regenera ninguna figura matplotlib en este endpoint.
 """
 
+import base64
 import io
 import json
 import logging
 import os
+import re
 from datetime import datetime
 
 from fpdf import FPDF
@@ -167,6 +173,25 @@ class _PDF(FPDF):
         self.ln()
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _png_from_region_html(grafica_region_html: str) -> bytes | None:
+    """
+    Extrae el PNG base64 del HTML almacenado en BD (grafica_region_html).
+    El HTML tiene la forma: <img src="data:image/png;base64,XXXX" ...>
+    No regenera ninguna figura — solo decodifica el string ya existente.
+    """
+    if not grafica_region_html:
+        return None
+    m = re.search(r'src="data:image/png;base64,([^"]+)"', grafica_region_html)
+    if not m:
+        return None
+    try:
+        return base64.b64decode(m.group(1))
+    except Exception:
+        return None
+
+
 # ── Main function ─────────────────────────────────────────────────────────────
 
 def generar_pdf_optimizacion(item: dict) -> bytes:
@@ -280,17 +305,51 @@ def generar_pdf_optimizacion(item: dict) -> bytes:
             pdf.ln()
         pdf.ln(8)
 
-    # ── Nota de gráficas ──────────────────────────────────────────────
-    # Las gráficas no se incluyen en el PDF en Render free tier (512 MB RAM).
-    # La región factible y el plan interactivo están disponibles en el dashboard.
-    pdf.ln(4)
+    # ── Región Factible ───────────────────────────────────────────────
+    # El PNG ya está guardado en BD (generado durante /optimizar).
+    # Solo lo extraemos del base64 y lo incrustamos: ~1 MB RAM, sin matplotlib.
+    grafica_region_html = item.get("grafica_region_html") or ""
+    png_bytes = _png_from_region_html(grafica_region_html)
+    if png_bytes:
+        pdf.section_title("Region Factible — Metodo Grafico PL")
+        pdf.set_font("Helvetica", "I", 8)
+        pdf.set_text_color(107, 114, 128)
+        pdf.cell(
+            0, 5,
+            "Proyeccion (x1=Pant. Diario, x2=Camisa Diaria) | x3, x4, x5 fijos en optimo",
+            ln=True,
+        )
+        pdf.set_text_color(17, 24, 39)
+        pdf.ln(2)
+        try:
+            buf = io.BytesIO(png_bytes)
+            pdf.image(buf, x=10, w=190)
+            buf.close()
+            del buf, png_bytes
+        except Exception as exc:
+            logger.warning("No se pudo incrustar imagen de region factible: %s", exc)
+        pdf.ln(4)
+    else:
+        # Si el registro no tiene grafica_region_html (ejecuciones antiguas)
+        pdf.ln(4)
+        pdf.set_fill_color(239, 246, 255)
+        pdf.set_font("Helvetica", "I", 8)
+        pdf.set_text_color(37, 99, 235)
+        pdf.multi_cell(
+            0, 6,
+            "Grafica de Region Factible no disponible para esta ejecucion. "
+            "Ejecute una nueva optimizacion para generarla.",
+            fill=True, align="C",
+        )
+        pdf.set_text_color(17, 24, 39)
+
+    # ── Nota gráfica interactiva ──────────────────────────────────────
     pdf.set_fill_color(239, 246, 255)
     pdf.set_font("Helvetica", "I", 8)
     pdf.set_text_color(37, 99, 235)
     pdf.multi_cell(
         0, 6,
-        "Las graficas interactivas (Region Factible y Plan de Produccion) "
-        "estan disponibles en el Dashboard > Optimizacion del sistema.",
+        "Grafica interactiva de Plan de Produccion disponible en el Dashboard > Optimizacion.",
         fill=True, align="C",
     )
     pdf.set_text_color(17, 24, 39)
