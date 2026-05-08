@@ -86,24 +86,51 @@ def optimizar(
     - Genera gráfica Plotly interactiva embebible en el dashboard.
     - Persiste el resultado en `historial_optimizacion`.
     """
-    logger.info("Ejecutando optimización — incluir_demanda=%s, ejecutado_por=%s", params.incluir_demanda, params.ejecutado_por)
+    logger.info(
+        "Ejecutando optimización — incluir_demanda=%s, ejecutado_por=%s",
+        params.incluir_demanda, params.ejecutado_por,
+    )
 
+    # ── 1. Resolver el modelo ILP ─────────────────────────────────────────
     output: OptimizadorOutput = resolver_optimizacion(params)
     resultado = output.resultado
+    logger.info(
+        "ILP resuelto — estado: %s | utilidad: %.0f COP | plan: %s",
+        resultado.estado, resultado.utilidad_total, resultado.plan.model_dump(),
+    )
 
+    # ── 2. Generar gráficas (solo si hay solución óptima) ─────────────────
     if resultado.estado == "OPTIMAL":
-        resultado.grafica_html = generar_grafica_optimizacion(resultado.model_dump())
-        resultado.grafica_region_html = generar_grafica_region_factible_html(
-            coef_matrix=output.coef_matrix,
-            stocks=output.stocks,
-            plan=resultado.plan,
-        )
+        try:
+            resultado.grafica_html = generar_grafica_optimizacion(resultado.model_dump())
+            logger.info("Gráfica Plotly generada OK")
+        except Exception as exc_plotly:
+            logger.error("Error generando gráfica Plotly: %s", exc_plotly, exc_info=True)
+            resultado.grafica_html = None  # no bloquear la respuesta por la gráfica
 
-    datos_historial = resultado.model_dump()
-    datos_historial["parametros"] = params.model_dump()
-    datos_historial["ejecutado_por"] = params.ejecutado_por
-    id_guardado = guardar_historial(datos_historial)
-    resultado.id = id_guardado
+        try:
+            resultado.grafica_region_html = generar_grafica_region_factible_html(
+                coef_matrix=output.coef_matrix,
+                stocks=output.stocks,
+                plan=resultado.plan,
+            )
+            logger.info("Gráfica región factible generada OK")
+        except Exception as exc_region:
+            logger.error("Error generando gráfica región factible: %s", exc_region, exc_info=True)
+            resultado.grafica_region_html = None  # no bloquear la respuesta por la gráfica
+
+    # ── 3. Persistir en historial ─────────────────────────────────────────
+    try:
+        datos_historial = resultado.model_dump()
+        datos_historial["parametros"] = params.model_dump()
+        datos_historial["ejecutado_por"] = params.ejecutado_por
+        id_guardado = guardar_historial(datos_historial)
+        resultado.id = id_guardado
+        logger.info("Historial guardado — id: %s", id_guardado)
+    except Exception as exc_db:
+        logger.error("Error guardando historial (resultado válido, solo falla persistencia): %s", exc_db, exc_info=True)
+        # No fallar el endpoint — el resultado de optimización es válido
+        # aunque no se haya podido guardar en BD
 
     return resultado
 
