@@ -1,13 +1,17 @@
 """
 Genera un PDF profesional del resultado de optimización.
-Stack: fpdf2 (layout) + PNG base64 almacenado en BD (sin regenerar matplotlib).
+Stack: fpdf2 (layout) + matplotlib (gráficas) + PNG base64 desde BD.
+
+Layout:
+  Pág 1 — Título / KPIs / Tabla plan / Gráfica de barras plan
+  Pág 2 — Tabla utilización de insumos
+  Pág N — Región factible a página completa (PNG desde BD, sin regenerar)
 
 Estrategia de memoria (Render free tier 512 MB):
-- Plan y recursos: tablas de texto (cero matplotlib).
-- Región factible: PNG ya generado en /optimizar y guardado en BD como base64
-  dentro de grafica_region_html. Solo extraemos el string y lo decodificamos
-  con base64 → BytesIO. Pillow carga ~1 MB descomprimido: sin riesgo de OOM.
-- NO se regenera ninguna figura matplotlib en este endpoint.
+- Con stocks realistas el RSS post-optimización es ~100-150 MB.
+- Gráfica de barras del plan: matplotlib simple, ~20 MB extra → seguro.
+- Región factible: extraída del base64 guardado en BD → ~5 MB Pillow.
+- Chequeo de RSS antes de cada imagen: si > 420 MB se omite con nota.
 """
 
 import base64
@@ -17,6 +21,10 @@ import logging
 import os
 import re
 from datetime import datetime
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from fpdf import FPDF
 
@@ -207,6 +215,80 @@ def _png_from_region_html(grafica_region_html: str) -> bytes | None:
         return None
 
 
+def _nota_grafica_no_disponible(pdf: "FPDF", rss: float, motivo: str):
+    """Muestra un recuadro azul informativo cuando la imagen no se puede incrustar."""
+    pdf.set_fill_color(239, 246, 255)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_text_color(37, 99, 235)
+    if motivo == "memoria":
+        msg = (f"Grafica omitida: memoria del servidor alta ({rss:.0f} MB / 512 MB). "
+               "Descargue el PDF unos minutos despues de la optimizacion.")
+    elif motivo == "sin_datos":
+        msg = ("Grafica no disponible para esta ejecucion. "
+               "Ejecute una nueva optimizacion para generarla.")
+    else:
+        msg = "No se pudo incrustar la grafica. Disponible en el Dashboard > Optimizacion."
+    pdf.multi_cell(0, 6, msg, fill=True, align="C")
+    pdf.set_text_color(17, 24, 39)
+
+
+def _generar_grafica_plan_png(plan: dict) -> bytes | None:
+    """
+    Gráfica de barras del plan de producción: 5 prendas × unidades.
+    Generada en el endpoint PDF (RSS bajo con stocks realistas).
+    """
+    try:
+        labels = [NOMBRES_PRENDAS[k] for k in PLAN_KEYS]
+        values = [plan.get(k, 0) for k in PLAN_KEYS]
+        max_v  = max(values) if any(values) else 1
+
+        fig, ax = plt.subplots(figsize=(10, 4.5))
+        fig.patch.set_facecolor("white")
+        ax.set_facecolor("#F8FAFC")
+
+        bars = ax.bar(labels, values, color=COLORES_PLAN, edgecolor="white",
+                      linewidth=0.8, zorder=3)
+
+        # Etiqueta encima de cada barra
+        for bar, val in zip(bars, values):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + max_v * 0.025,
+                f"{val:,}",
+                ha="center", va="bottom",
+                fontsize=10, fontweight="bold", color="#111827",
+            )
+
+        ax.set_ylabel("Unidades a producir", fontsize=10, color="#374151")
+        ax.set_title("Plan de Produccion Optimo", fontsize=13,
+                     fontweight="bold", color="#111827", pad=14)
+        ax.set_ylim(0, max_v * 1.20)
+        ax.tick_params(axis="x", labelsize=9, colors="#374151")
+        ax.tick_params(axis="y", labelsize=8, colors="#9CA3AF")
+        ax.yaxis.set_major_formatter(
+            plt.FuncFormatter(lambda x, _: f"{int(x):,}")
+        )
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_color("#E5E7EB")
+        ax.spines["bottom"].set_color("#E5E7EB")
+        ax.grid(True, axis="y", alpha=0.30, linestyle="--", color="#9CA3AF", zorder=0)
+        plt.tight_layout()
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png", dpi=130, bbox_inches="tight")
+        plt.close(fig)
+        plt.close("all")
+        buf.seek(0)
+        data = buf.read()
+        buf.close()
+        return data
+    except Exception as exc:
+        logger.warning("No se pudo generar grafica de plan: %s", exc)
+        plt.close("all")
+        return None
+
+
 # ── Main function ─────────────────────────────────────────────────────────────
 
 def generar_pdf_optimizacion(item: dict) -> bytes:
@@ -273,7 +355,7 @@ def generar_pdf_optimizacion(item: dict) -> bytes:
         pdf.set_text_color(17, 24, 39)
         pdf.ln(4)
 
-    # ── Plan de producción ────────────────────────────────────────────
+    # ── Plan de producción — tabla ────────────────────────────────────
     pdf.section_title("Plan de Produccion")
     pdf.th([85, 40, 65], ["Prenda", "Unidades", "Utilidad Parcial"])
     for i, key in enumerate(PLAN_KEYS):
@@ -292,7 +374,22 @@ def generar_pdf_optimizacion(item: dict) -> bytes:
     pdf.cell(40, 8, str(total_prendas), fill=True, border=0, align="C")
     pdf.cell(65, 8, f"${utilidad:,.0f}", fill=True, border=0, align="R")
     pdf.set_text_color(17, 24, 39)
-    pdf.ln(10)
+    pdf.ln(8)
+
+    # ── Plan de producción — gráfica de barras ────────────────────────
+    rss = _rss_mb()
+    logger.info("RSS antes de grafica de barras: %.0f MB", rss)
+    if rss == 0.0 or rss < 420:
+        plan_png = _generar_grafica_plan_png(plan)
+        if plan_png:
+            try:
+                buf = io.BytesIO(plan_png)
+                pdf.image(buf, x=10, w=190)
+                buf.close()
+                del buf, plan_png
+            except Exception as exc:
+                logger.warning("No se pudo incrustar grafica de plan: %s", exc)
+    pdf.ln(6)
 
     # ── Recursos ──────────────────────────────────────────────────────
     if stocks_usados:
@@ -320,53 +417,42 @@ def generar_pdf_optimizacion(item: dict) -> bytes:
             pdf.ln()
         pdf.ln(8)
 
-    # ── Región Factible ───────────────────────────────────────────────
-    # El PNG ya está guardado en BD (generado durante /optimizar).
-    # Antes de incrustar, verificamos el RSS actual: si supera 390 MB
-    # omitimos la imagen para evitar el OOM kill en Render free (512 MB).
+    # ── Región Factible — página completa ────────────────────────────
     grafica_region_html = item.get("grafica_region_html") or ""
     png_bytes = _png_from_region_html(grafica_region_html)
 
-    rss = _rss_mb()
-    # 0.0 = no disponible (dev local) → intentar siempre
-    imagen_viable = png_bytes is not None and (rss == 0.0 or rss < 390)
-    logger.info("RSS antes de imagen PDF: %.0f MB | imagen_viable=%s", rss, imagen_viable)
+    rss2 = _rss_mb()
+    imagen_viable = png_bytes is not None and (rss2 == 0.0 or rss2 < 420)
+    logger.info("RSS antes de region factible: %.0f MB | viable=%s", rss2, imagen_viable)
+
+    pdf.add_page()
+
+    pdf.section_title("Region Factible - Metodo Grafico PL")
+    pdf.set_font("Helvetica", "I", 9)
+    pdf.set_text_color(107, 114, 128)
+    pdf.cell(
+        0, 5,
+        "Proyeccion en (x1=Pant. Diario, x2=Camisa Diaria)  |  x3, x4, x5 fijos en el optimo",
+        ln=True,
+    )
+    pdf.set_text_color(17, 24, 39)
+    pdf.ln(3)
 
     if imagen_viable:
-        pdf.section_title("Region Factible - Metodo Grafico PL")
-        pdf.set_font("Helvetica", "I", 8)
-        pdf.set_text_color(107, 114, 128)
-        pdf.cell(
-            0, 5,
-            "Proyeccion (x1=Pant. Diario, x2=Camisa Diaria) | x3, x4, x5 fijos en optimo",
-            ln=True,
-        )
-        pdf.set_text_color(17, 24, 39)
-        pdf.ln(2)
         try:
             buf = io.BytesIO(png_bytes)
+            # Imagen centrada a ancho completo; alto proporcional (~143 mm con aspect 10:7.5)
             pdf.image(buf, x=10, w=190)
             buf.close()
             del buf, png_bytes
         except Exception as exc:
-            logger.warning("No se pudo incrustar imagen de region factible: %s", exc)
-        pdf.ln(4)
+            logger.warning("No se pudo incrustar region factible: %s", exc)
+            _nota_grafica_no_disponible(pdf, rss2, motivo="error")
     else:
-        pdf.ln(4)
-        pdf.set_fill_color(239, 246, 255)
-        pdf.set_font("Helvetica", "I", 8)
-        pdf.set_text_color(37, 99, 235)
-        if not png_bytes:
-            msg = ("Grafica de Region Factible no disponible para esta ejecucion. "
-                   "Ejecute una nueva optimizacion para generarla.")
-        else:
-            msg = (f"Grafica omitida: memoria del servidor alta ({rss:.0f} MB / 512 MB). "
-                   "Descargue el PDF unos minutos despues de la optimizacion o "
-                   "consulte la grafica interactiva en el Dashboard.")
-        pdf.multi_cell(0, 6, msg, fill=True, align="C")
-        pdf.set_text_color(17, 24, 39)
+        _nota_grafica_no_disponible(pdf, rss2, motivo="memoria" if png_bytes else "sin_datos")
 
-    # ── Nota gráfica interactiva ──────────────────────────────────────
+    # ── Nota pie de página ────────────────────────────────────────────
+    pdf.ln(6)
     pdf.set_fill_color(239, 246, 255)
     pdf.set_font("Helvetica", "I", 8)
     pdf.set_text_color(37, 99, 235)
