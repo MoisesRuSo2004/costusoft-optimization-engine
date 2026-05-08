@@ -175,6 +175,21 @@ class _PDF(FPDF):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _rss_mb() -> float:
+    """
+    Retorna el RSS actual del proceso en MB (Linux/Render).
+    Lee /proc/self/status; devuelve 0.0 si no está disponible (Windows/macOS dev).
+    """
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024  # kB → MB
+    except Exception:
+        pass
+    return 0.0
+
+
 def _png_from_region_html(grafica_region_html: str) -> bytes | None:
     """
     Extrae el PNG base64 del HTML almacenado en BD (grafica_region_html).
@@ -307,10 +322,17 @@ def generar_pdf_optimizacion(item: dict) -> bytes:
 
     # ── Región Factible ───────────────────────────────────────────────
     # El PNG ya está guardado en BD (generado durante /optimizar).
-    # Solo lo extraemos del base64 y lo incrustamos: ~1 MB RAM, sin matplotlib.
+    # Antes de incrustar, verificamos el RSS actual: si supera 390 MB
+    # omitimos la imagen para evitar el OOM kill en Render free (512 MB).
     grafica_region_html = item.get("grafica_region_html") or ""
     png_bytes = _png_from_region_html(grafica_region_html)
-    if png_bytes:
+
+    rss = _rss_mb()
+    # 0.0 = no disponible (dev local) → intentar siempre
+    imagen_viable = png_bytes is not None and (rss == 0.0 or rss < 390)
+    logger.info("RSS antes de imagen PDF: %.0f MB | imagen_viable=%s", rss, imagen_viable)
+
+    if imagen_viable:
         pdf.section_title("Region Factible - Metodo Grafico PL")
         pdf.set_font("Helvetica", "I", 8)
         pdf.set_text_color(107, 114, 128)
@@ -330,17 +352,18 @@ def generar_pdf_optimizacion(item: dict) -> bytes:
             logger.warning("No se pudo incrustar imagen de region factible: %s", exc)
         pdf.ln(4)
     else:
-        # Si el registro no tiene grafica_region_html (ejecuciones antiguas)
         pdf.ln(4)
         pdf.set_fill_color(239, 246, 255)
         pdf.set_font("Helvetica", "I", 8)
         pdf.set_text_color(37, 99, 235)
-        pdf.multi_cell(
-            0, 6,
-            "Grafica de Region Factible no disponible para esta ejecucion. "
-            "Ejecute una nueva optimizacion para generarla.",
-            fill=True, align="C",
-        )
+        if not png_bytes:
+            msg = ("Grafica de Region Factible no disponible para esta ejecucion. "
+                   "Ejecute una nueva optimizacion para generarla.")
+        else:
+            msg = (f"Grafica omitida: memoria del servidor alta ({rss:.0f} MB / 512 MB). "
+                   "Descargue el PDF unos minutos despues de la optimizacion o "
+                   "consulte la grafica interactiva en el Dashboard.")
+        pdf.multi_cell(0, 6, msg, fill=True, align="C")
         pdf.set_text_color(17, 24, 39)
 
     # ── Nota gráfica interactiva ──────────────────────────────────────

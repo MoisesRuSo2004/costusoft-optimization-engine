@@ -134,6 +134,12 @@ def optimizar(
         # No fallar el endpoint — el resultado de optimización es válido
         # aunque no se haya podido guardar en BD
 
+    # ── 4. Liberar memoria post-optimización ─────────────────────────────
+    # Las gráficas matplotlib/plotly y los datos ILP pueden dejar el RSS
+    # elevado. Forzar GC aquí reduce el pico de memoria para peticiones
+    # posteriores (especialmente la descarga del PDF).
+    gc.collect()
+
     return resultado
 
 
