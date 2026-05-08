@@ -83,9 +83,10 @@ def _img_plan(plan: dict, utilidad: float) -> bytes:
     plt.tight_layout()
 
     buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=96, bbox_inches="tight")  # 96 vs 150
+    plt.savefig(buf, format="png", dpi=96, bbox_inches="tight")
     plt.close(fig)
     plt.close("all")
+    buf.seek(0)  # ← volver al inicio antes de leer
     data = buf.read()
     buf.close()
     return data
@@ -137,9 +138,10 @@ def _img_recursos(recursos: dict) -> bytes | None:
     plt.tight_layout()
 
     buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=96, bbox_inches="tight")  # 96 vs 150
+    plt.savefig(buf, format="png", dpi=96, bbox_inches="tight")
     plt.close(fig)
     plt.close("all")
+    buf.seek(0)  # ← volver al inicio antes de leer
     data = buf.read()
     buf.close()
     return data
