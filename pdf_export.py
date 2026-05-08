@@ -57,9 +57,9 @@ PLAN_KEYS = list(NOMBRES_PRENDAS.keys())
 def _img_plan(plan: dict, utilidad: float) -> bytes:
     labels = [NOMBRES_PRENDAS[k] for k in PLAN_KEYS]
     values = [plan.get(k, 0) for k in PLAN_KEYS]
-    colors = COLORES_PLAN[: len(labels)]          # siempre mismo largo que las barras
+    colors = COLORES_PLAN[: len(labels)]
 
-    fig, ax = plt.subplots(figsize=(10, 4.5))
+    fig, ax = plt.subplots(figsize=(8, 3.5))  # reducido vs 10x4.5
     bars = ax.bar(labels, values, color=colors, edgecolor="white", linewidth=1.5, width=0.55)
 
     max_val = max(values + [1])
@@ -68,14 +68,14 @@ def _img_plan(plan: dict, utilidad: float) -> bytes:
             ax.text(
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height() + max_val * 0.02,
-                str(val), ha="center", va="bottom", fontweight="bold", fontsize=11,
+                str(val), ha="center", va="bottom", fontweight="bold", fontsize=10,
             )
 
     ax.set_title(f"Plan de Produccion - Utilidad Maxima: ${utilidad:,.0f} COP",
-                 fontsize=12, fontweight="bold", pad=14)
-    ax.set_ylabel("Unidades a producir", fontsize=10)
+                 fontsize=11, fontweight="bold", pad=12)
+    ax.set_ylabel("Unidades a producir", fontsize=9)
     ax.set_ylim(0, max_val * 1.22)
-    ax.tick_params(axis="x", labelsize=9)
+    ax.tick_params(axis="x", labelsize=8)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.set_facecolor("#F9FAFB")
@@ -83,10 +83,12 @@ def _img_plan(plan: dict, utilidad: float) -> bytes:
     plt.tight_layout()
 
     buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.savefig(buf, format="png", dpi=96, bbox_inches="tight")  # 96 vs 150
     plt.close(fig)
-    buf.seek(0)
-    return buf.read()
+    plt.close("all")
+    data = buf.read()
+    buf.close()
+    return data
 
 
 def _img_region_factible_from_html(html_str: str | None) -> bytes | None:
@@ -115,18 +117,18 @@ def _img_recursos(recursos: dict) -> bytes | None:
     pcts = [_rv(v, "utilizacion_pct", 0) for v in recursos.values()]
     colors = ["#EF4444" if p >= 95 else "#F59E0B" if p >= 75 else "#10B981" for p in pcts]
 
-    fig, ax = plt.subplots(figsize=(9, max(3, len(labels) * 0.7 + 1.5)))
+    fig, ax = plt.subplots(figsize=(8, max(2.5, len(labels) * 0.6 + 1.2)))  # reducido
     bars = ax.barh(labels, pcts, color=colors, edgecolor="white", linewidth=1, height=0.55)
     ax.axvline(x=100, color="red", linestyle="--", alpha=0.5, linewidth=1.2)
 
     for bar, pct in zip(bars, pcts):
         ax.text(
             min(pct + 1.5, 102), bar.get_y() + bar.get_height() / 2,
-            f"{pct:.1f}%", va="center", fontsize=10, fontweight="bold",
+            f"{pct:.1f}%", va="center", fontsize=9, fontweight="bold",
         )
 
-    ax.set_title("Utilizacion de Insumos", fontsize=12, fontweight="bold", pad=14)
-    ax.set_xlabel("Porcentaje utilizado (%)", fontsize=10)
+    ax.set_title("Utilizacion de Insumos", fontsize=11, fontweight="bold", pad=12)
+    ax.set_xlabel("Porcentaje utilizado (%)", fontsize=9)
     ax.set_xlim(0, 120)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -135,10 +137,12 @@ def _img_recursos(recursos: dict) -> bytes | None:
     plt.tight_layout()
 
     buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.savefig(buf, format="png", dpi=96, bbox_inches="tight")  # 96 vs 150
     plt.close(fig)
-    buf.seek(0)
-    return buf.read()
+    plt.close("all")
+    data = buf.read()
+    buf.close()
+    return data
 
 
 # ── FPDF class ────────────────────────────────────────────────────────────────

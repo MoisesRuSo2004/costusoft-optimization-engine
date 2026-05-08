@@ -13,6 +13,7 @@ from database import (
     init_db,
     obtener_historial,
     obtener_historial_por_id,
+    obtener_historial_por_id_para_pdf,
 )
 from optimizer import OptimizadorOutput, resolver_optimizacion
 from pdf_export import generar_pdf_optimizacion
@@ -171,10 +172,19 @@ def descargar_pdf(
     _: str = Depends(verificar_token),
 ) -> Response:
     """Genera y descarga el PDF del resultado de optimización."""
-    item = obtener_historial_por_id(record_id)
+    # Usamos la query ligera: excluye grafica_html (HTML Plotly, varios MB innecesarios)
+    item = obtener_historial_por_id_para_pdf(record_id)
     if not item:
         raise HTTPException(status_code=404, detail=f"No existe historial con id={record_id}")
-    pdf_bytes = generar_pdf_optimizacion(item)
+
+    logger.info("Generando PDF para historial id=%s", record_id)
+    try:
+        pdf_bytes = generar_pdf_optimizacion(item)
+        logger.info("PDF generado OK para id=%s — tamaño: %d KB", record_id, len(pdf_bytes) // 1024)
+    except Exception as exc:
+        logger.error("Error generando PDF id=%s: %s", record_id, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error generando el PDF: {exc}")
+
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
