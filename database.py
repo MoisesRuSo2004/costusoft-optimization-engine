@@ -187,15 +187,15 @@ def obtener_historial_por_id(record_id: int) -> dict | None:
 
 def obtener_historial_por_id_para_pdf(record_id: int) -> dict | None:
     """
-    Igual a obtener_historial_por_id pero SIN grafica_html (HTML Plotly de varios MB).
-    El PDF solo necesita grafica_region_html (PNG base64) y los datos numéricos.
-    Evita cargar datos innecesarios en memoria al generar el PDF.
+    Query mínima para generación de PDF: solo datos numéricos y texto.
+    Excluye grafica_html y grafica_region_html (varios MB innecesarios)
+    para no consumir RAM extra en Render free tier (512 MB).
     """
     query = text("""
-        SELECT id, fecha_ejecucion, estado_solucion, utilidad_total, talla,
+        SELECT id, fecha_ejecucion, estado_solucion, utilidad_total,
                x1_pantalon_diario, x2_camisa_diario, x3_pantalon_ef, x4_sueter_ef,
                COALESCE(x5_sueter_diario, 0) AS x5_sueter_diario,
-               stocks_usados, parametros_entrada, grafica_region_html, mensaje, created_at
+               stocks_usados, mensaje, created_at
         FROM historial_optimizacion
         WHERE id = :id
     """)

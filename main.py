@@ -1,3 +1,4 @@
+import gc
 import logging
 from contextlib import asynccontextmanager
 
@@ -177,6 +178,9 @@ def descargar_pdf(
     if not item:
         raise HTTPException(status_code=404, detail=f"No existe historial con id={record_id}")
 
+    # Forzar GC antes de generar el PDF — la optimización previa puede haber
+    # dejado arrays numpy/matplotlib en memoria sin liberar al SO todavía.
+    gc.collect()
     logger.info("Generando PDF para historial id=%s", record_id)
     try:
         pdf_bytes = generar_pdf_optimizacion(item)

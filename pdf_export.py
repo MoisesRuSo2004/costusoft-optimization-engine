@@ -6,12 +6,10 @@ en Render free tier (512 MB). Solo se incluye la región factible, cuyo PNG
 ya está guardado en historial_optimizacion.grafica_region_html.
 """
 
-import base64
 import io
 import json
 import logging
 import os
-import re
 from datetime import datetime
 
 from fpdf import FPDF
@@ -50,19 +48,6 @@ UTILIDADES = {
 }
 COLORES_PLAN = ["#2563EB", "#7C3AED", "#EC4899", "#059669", "#D97706"]
 PLAN_KEYS = list(NOMBRES_PRENDAS.keys())
-
-
-def _img_region_factible_from_html(html_str: str | None) -> bytes | None:
-    """Extrae el PNG base64 embebido en el HTML de la región factible."""
-    if not html_str:
-        return None
-    m = re.search(r'data:image/png;base64,([^"]+)', html_str)
-    if not m:
-        return None
-    try:
-        return base64.b64decode(m.group(1))
-    except Exception:
-        return None
 
 
 # ── FPDF class ────────────────────────────────────────────────────────────────
@@ -185,7 +170,6 @@ class _PDF(FPDF):
 # ── Main function ─────────────────────────────────────────────────────────────
 
 def generar_pdf_optimizacion(item: dict) -> bytes:
-    grafica_region_html = item.get("grafica_region_html")
     stocks_usados = item.get("stocks_usados") or {}
     if isinstance(stocks_usados, str):
         try:
@@ -296,32 +280,19 @@ def generar_pdf_optimizacion(item: dict) -> bytes:
             pdf.ln()
         pdf.ln(8)
 
-    # ── Gráfica: Región Factible (PNG ya almacenado en BD, sin generar matplotlib nuevo)
-    # Las gráficas de plan y recursos se omiten en el PDF para evitar OOM en Render
-    # free tier (512 MB). Los datos ya están completos en las tablas de arriba.
-    try:
-        img_region = _img_region_factible_from_html(grafica_region_html)
-        if img_region:
-            pdf.add_page()
-            pdf.section_title("Grafica - Region Factible (Metodo Grafico PL)")
-            pdf.set_font("Helvetica", "", 8)
-            pdf.set_text_color(107, 114, 128)
-            pdf.multi_cell(
-                0, 5,
-                "Proyeccion bidimensional (x1=Pantalon Diario, x2=Camisa Diaria) "
-                "con Sueter Diario, Pantalon EF y Sueter EF fijados en sus valores optimos. "
-                "Area azul = region factible. Punto rojo = solucion optima.",
-            )
-            pdf.set_text_color(17, 24, 39)
-            pdf.ln(3)
-            buf_reg = io.BytesIO(img_region)
-            buf_reg.seek(0)
-            pdf.image(buf_reg, x=10, w=190)
-            buf_reg.close()
-            del img_region
-        else:
-            logger.warning("grafica_region_html vacio o sin datos base64 — omitiendo grafica del PDF")
-    except Exception as e:
-        logger.error("Error incluyendo region factible en PDF: %s", e, exc_info=True)
+    # ── Nota de gráficas ──────────────────────────────────────────────
+    # Las gráficas no se incluyen en el PDF en Render free tier (512 MB RAM).
+    # La región factible y el plan interactivo están disponibles en el dashboard.
+    pdf.ln(4)
+    pdf.set_fill_color(239, 246, 255)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_text_color(37, 99, 235)
+    pdf.multi_cell(
+        0, 6,
+        "Las graficas interactivas (Region Factible y Plan de Produccion) "
+        "estan disponibles en el Dashboard > Optimizacion del sistema.",
+        fill=True, align="C",
+    )
+    pdf.set_text_color(17, 24, 39)
 
     return bytes(pdf.output())
