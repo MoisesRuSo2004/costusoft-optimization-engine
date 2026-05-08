@@ -1,6 +1,9 @@
 """
 Genera un PDF profesional del resultado de optimización.
-Stack: fpdf2 (layout) + matplotlib (gráficas estáticas en PNG).
+Stack: fpdf2 (layout) + PNG base64 almacenado en BD (sin regenerar matplotlib).
+Nota: las gráficas de plan y recursos se muestran como tablas para evitar OOM
+en Render free tier (512 MB). Solo se incluye la región factible, cuyo PNG
+ya está guardado en historial_optimizacion.grafica_region_html.
 """
 
 import base64
@@ -11,9 +14,6 @@ import os
 import re
 from datetime import datetime
 
-import matplotlib
-matplotlib.use("Agg")  # backend sin GUI
-import matplotlib.pyplot as plt
 from fpdf import FPDF
 
 logger = logging.getLogger(__name__)
@@ -52,46 +52,6 @@ COLORES_PLAN = ["#2563EB", "#7C3AED", "#EC4899", "#059669", "#D97706"]
 PLAN_KEYS = list(NOMBRES_PRENDAS.keys())
 
 
-# ── Imágenes matplotlib ───────────────────────────────────────────────────────
-
-def _img_plan(plan: dict, utilidad: float) -> bytes:
-    labels = [NOMBRES_PRENDAS[k] for k in PLAN_KEYS]
-    values = [plan.get(k, 0) for k in PLAN_KEYS]
-    colors = COLORES_PLAN[: len(labels)]
-
-    fig, ax = plt.subplots(figsize=(8, 3.5))  # reducido vs 10x4.5
-    bars = ax.bar(labels, values, color=colors, edgecolor="white", linewidth=1.5, width=0.55)
-
-    max_val = max(values + [1])
-    for bar, val in zip(bars, values):
-        if val > 0:
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + max_val * 0.02,
-                str(val), ha="center", va="bottom", fontweight="bold", fontsize=10,
-            )
-
-    ax.set_title(f"Plan de Produccion - Utilidad Maxima: ${utilidad:,.0f} COP",
-                 fontsize=11, fontweight="bold", pad=12)
-    ax.set_ylabel("Unidades a producir", fontsize=9)
-    ax.set_ylim(0, max_val * 1.22)
-    ax.tick_params(axis="x", labelsize=8)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.set_facecolor("#F9FAFB")
-    fig.patch.set_facecolor("white")
-    plt.tight_layout()
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=96, bbox_inches="tight")
-    plt.close(fig)
-    plt.close("all")
-    buf.seek(0)  # ← volver al inicio antes de leer
-    data = buf.read()
-    buf.close()
-    return data
-
-
 def _img_region_factible_from_html(html_str: str | None) -> bytes | None:
     """Extrae el PNG base64 embebido en el HTML de la región factible."""
     if not html_str:
@@ -103,48 +63,6 @@ def _img_region_factible_from_html(html_str: str | None) -> bytes | None:
         return base64.b64decode(m.group(1))
     except Exception:
         return None
-
-
-def _img_recursos(recursos: dict) -> bytes | None:
-    if not recursos:
-        return None
-
-    def _rv(r, field, default=0):
-        return r.get(field, default) if isinstance(r, dict) else getattr(r, field, default)
-    labels = [
-        f"{NOMBRES_INSUMOS.get(k, k.title())} ({_rv(v, 'unidad_medida', 'un') or 'un'})"
-        for k, v in recursos.items()
-    ]
-    pcts = [_rv(v, "utilizacion_pct", 0) for v in recursos.values()]
-    colors = ["#EF4444" if p >= 95 else "#F59E0B" if p >= 75 else "#10B981" for p in pcts]
-
-    fig, ax = plt.subplots(figsize=(8, max(2.5, len(labels) * 0.6 + 1.2)))  # reducido
-    bars = ax.barh(labels, pcts, color=colors, edgecolor="white", linewidth=1, height=0.55)
-    ax.axvline(x=100, color="red", linestyle="--", alpha=0.5, linewidth=1.2)
-
-    for bar, pct in zip(bars, pcts):
-        ax.text(
-            min(pct + 1.5, 102), bar.get_y() + bar.get_height() / 2,
-            f"{pct:.1f}%", va="center", fontsize=9, fontweight="bold",
-        )
-
-    ax.set_title("Utilizacion de Insumos", fontsize=11, fontweight="bold", pad=12)
-    ax.set_xlabel("Porcentaje utilizado (%)", fontsize=9)
-    ax.set_xlim(0, 120)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.set_facecolor("#F9FAFB")
-    fig.patch.set_facecolor("white")
-    plt.tight_layout()
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=96, bbox_inches="tight")
-    plt.close(fig)
-    plt.close("all")
-    buf.seek(0)  # ← volver al inicio antes de leer
-    data = buf.read()
-    buf.close()
-    return data
 
 
 # ── FPDF class ────────────────────────────────────────────────────────────────
@@ -378,34 +296,9 @@ def generar_pdf_optimizacion(item: dict) -> bytes:
             pdf.ln()
         pdf.ln(8)
 
-    # ── Gráficas ──────────────────────────────────────────────────────
-    # Gráfica 1: Plan de producción
-    try:
-        img_bytes = _img_plan(plan, utilidad)
-        pdf.add_page()
-        pdf.section_title("Grafica - Plan de Produccion")
-        buf = io.BytesIO(img_bytes)
-        buf.seek(0)
-        pdf.image(buf, x=10, w=190)
-        pdf.ln(4)
-    except Exception as e:
-        logger.error("Error generando grafica plan en PDF: %s", e, exc_info=True)
-
-    # Gráfica 2: Utilización de insumos
-    if stocks_usados:
-        try:
-            img_rec = _img_recursos(stocks_usados)
-            if img_rec:
-                pdf.add_page()
-                pdf.section_title("Grafica - Utilizacion de Insumos")
-                buf_rec = io.BytesIO(img_rec)
-                buf_rec.seek(0)
-                pdf.image(buf_rec, x=10, w=190)
-                pdf.ln(4)
-        except Exception as e:
-            logger.error("Error generando grafica recursos en PDF: %s", e, exc_info=True)
-
-    # Gráfica 3: Región factible (método gráfico PL)
+    # ── Gráfica: Región Factible (PNG ya almacenado en BD, sin generar matplotlib nuevo)
+    # Las gráficas de plan y recursos se omiten en el PDF para evitar OOM en Render
+    # free tier (512 MB). Los datos ya están completos en las tablas de arriba.
     try:
         img_region = _img_region_factible_from_html(grafica_region_html)
         if img_region:
@@ -424,8 +317,10 @@ def generar_pdf_optimizacion(item: dict) -> bytes:
             buf_reg = io.BytesIO(img_region)
             buf_reg.seek(0)
             pdf.image(buf_reg, x=10, w=190)
+            buf_reg.close()
+            del img_region
         else:
-            logger.warning("grafica_region_html vacio o sin datos base64 - omitiendo del PDF")
+            logger.warning("grafica_region_html vacio o sin datos base64 — omitiendo grafica del PDF")
     except Exception as e:
         logger.error("Error incluyendo region factible en PDF: %s", e, exc_info=True)
 
