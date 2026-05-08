@@ -311,7 +311,7 @@ def generar_pdf_optimizacion(item: dict) -> bytes:
     grafica_region_html = item.get("grafica_region_html") or ""
     png_bytes = _png_from_region_html(grafica_region_html)
     if png_bytes:
-        pdf.section_title("Region Factible — Metodo Grafico PL")
+        pdf.section_title("Region Factible - Metodo Grafico PL")
         pdf.set_font("Helvetica", "I", 8)
         pdf.set_text_color(107, 114, 128)
         pdf.cell(
