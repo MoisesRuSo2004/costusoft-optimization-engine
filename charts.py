@@ -225,26 +225,25 @@ def _build_region_png(coef_matrix: dict, stocks: dict, plan: dict) -> bytes:
     max_x = min(max(x_bounds + [10.0]) * 1.2, 600.0)
     max_y = min(max(y_bounds + [10.0]) * 1.2, 600.0)
 
-    # Grilla de factibilidad — 180 pts en lugar de 350 para reducir uso de RAM
-    # (350×350 = 122 500 puntos; 180×180 = 32 400 puntos → ~75% menos memoria)
-    xs = np.linspace(0, max_x, 180)
-    ys = np.linspace(0, max_y, 180)
+    # Grilla de factibilidad — 260 pts: buen detalle sin exceso de RAM
+    # (260×260 = 67 600 puntos — balance calidad/memoria)
+    xs = np.linspace(0, max_x, 260)
+    ys = np.linspace(0, max_y, 260)
     X, Y = np.meshgrid(xs, ys)
     feasible = np.ones_like(X, dtype=bool)
     for _, cx, cy, rem in constraints:
         feasible &= (cx * X + cy * Y <= rem + 1e-9)
 
     # ── Figura ────────────────────────────────────────────────────────────
-    # figsize reducido para ahorrar memoria en Render free tier (512 MB RAM)
-    fig, ax = plt.subplots(figsize=(7, 5.5))
+    fig, ax = plt.subplots(figsize=(10, 7.5))
     fig.patch.set_facecolor("white")
     ax.set_facecolor("#F8FAFC")
 
     # Región factible sombreada
     ax.contourf(X, Y, feasible.astype(float), levels=[0.5, 1.5], colors=["#93C5FD"], alpha=0.40)
 
-    # Líneas de restricción — 400 pts suficientes para visualización
-    x_range = np.linspace(0, max_x, 400)
+    # Líneas de restricción — 600 pts para trazado suave
+    x_range = np.linspace(0, max_x, 600)
     for i, (ins, cx, cy, rem) in enumerate(constraints):
         color = _PALETTE[i % len(_PALETTE)]
         label = _INS_LABELS.get(ins, ins.title())
@@ -306,7 +305,7 @@ def _build_region_png(coef_matrix: dict, stocks: dict, plan: dict) -> bytes:
     plt.tight_layout()
 
     buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=96, bbox_inches="tight")  # dpi 96 en vez de 150
+    plt.savefig(buf, format="png", dpi=130, bbox_inches="tight")
     plt.close(fig)
     plt.close("all")  # asegurar que no queden figuras en memoria
     buf.seek(0)
