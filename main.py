@@ -15,6 +15,7 @@ from database import (
     obtener_historial,
     obtener_historial_por_id,
     obtener_historial_por_id_para_pdf,
+    obtener_nombre_colegio,
 )
 from optimizer import OptimizadorOutput, resolver_optimizacion
 from pdf_export import generar_pdf_optimizacion
@@ -89,50 +90,60 @@ def optimizar(
     - Persiste el resultado en `historial_optimizacion`.
     """
     logger.info(
-        "Ejecutando optimización — incluir_demanda=%s, ejecutado_por=%s",
-        params.incluir_demanda, params.ejecutado_por,
+        "Ejecutando optimización — colegio_id=%s, incluir_demanda=%s, ejecutado_por=%s",
+        params.colegio_id, params.incluir_demanda, params.ejecutado_por,
     )
+
+    # ── 0. Nombre del colegio (snapshot para historial y respuesta) ───────
+    nombre_colegio = obtener_nombre_colegio(params.colegio_id)
 
     # ── 1. Resolver el modelo ILP ─────────────────────────────────────────
     output: OptimizadorOutput = resolver_optimizacion(params)
     resultado = output.resultado
+    resultado.nombre_colegio = nombre_colegio
     logger.info(
-        "ILP resuelto — estado: %s | utilidad: %.0f COP | plan: %s",
-        resultado.estado, resultado.utilidad_total, resultado.plan.model_dump(),
+        "ILP resuelto — colegio: %s | estado: %s | utilidad: %.0f COP | vars: %s",
+        nombre_colegio, resultado.estado, resultado.utilidad_total, list(resultado.plan.keys()),
     )
 
     # ── 2. Generar gráficas (solo si hay solución óptima) ─────────────────
     if resultado.estado == "OPTIMAL":
         try:
-            resultado.grafica_html = generar_grafica_optimizacion(resultado.model_dump())
+            resultado.grafica_html = generar_grafica_optimizacion(
+                resultado.model_dump(),
+                var_labels=output.var_labels,
+                insumo_labels=output.insumo_labels,
+            )
             logger.info("Gráfica Plotly generada OK")
         except Exception as exc_plotly:
             logger.error("Error generando gráfica Plotly: %s", exc_plotly, exc_info=True)
-            resultado.grafica_html = None  # no bloquear la respuesta por la gráfica
+            resultado.grafica_html = None
 
         try:
             resultado.grafica_region_html = generar_grafica_region_factible_html(
                 coef_matrix=output.coef_matrix,
                 stocks=output.stocks,
                 plan=resultado.plan,
+                var_labels=output.var_labels,
+                insumo_labels=output.insumo_labels,
             )
             logger.info("Gráfica región factible generada OK")
         except Exception as exc_region:
             logger.error("Error generando gráfica región factible: %s", exc_region, exc_info=True)
-            resultado.grafica_region_html = None  # no bloquear la respuesta por la gráfica
+            resultado.grafica_region_html = None
 
     # ── 3. Persistir en historial ─────────────────────────────────────────
     try:
         datos_historial = resultado.model_dump()
-        datos_historial["parametros"] = params.model_dump()
-        datos_historial["ejecutado_por"] = params.ejecutado_por
+        datos_historial["parametros"]     = params.model_dump()
+        datos_historial["ejecutado_por"]  = params.ejecutado_por
+        datos_historial["nombre_colegio"] = nombre_colegio
+        datos_historial["insumo_labels"]  = output.insumo_labels
         id_guardado = guardar_historial(datos_historial)
         resultado.id = id_guardado
         logger.info("Historial guardado — id: %s", id_guardado)
     except Exception as exc_db:
-        logger.error("Error guardando historial (resultado válido, solo falla persistencia): %s", exc_db, exc_info=True)
-        # No fallar el endpoint — el resultado de optimización es válido
-        # aunque no se haya podido guardar en BD
+        logger.error("Error guardando historial (resultado válido): %s", exc_db, exc_info=True)
 
     # ── 4. Liberar memoria post-optimización ─────────────────────────────
     # Las gráficas matplotlib/plotly y los datos ILP pueden dejar el RSS
@@ -146,10 +157,11 @@ def optimizar(
 @app.get("/historial", response_model=HistorialResponse, tags=["Historial"])
 def historial(
     limit: int = 20,
+    colegio_id: int | None = None,
     _: str = Depends(verificar_token),
 ) -> HistorialResponse:
-    """Retorna las últimas N ejecuciones del optimizador."""
-    df = obtener_historial(limit)
+    """Retorna las últimas N ejecuciones. Filtra por colegio_id si se provee."""
+    df = obtener_historial(limit, colegio_id=colegio_id)
     items = df.to_dict("records") if not df.empty else []
     for item in items:
         for k, v in item.items():

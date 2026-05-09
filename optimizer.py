@@ -1,29 +1,30 @@
 """
 Motor ILP — Programación Lineal Entera Mixta con PuLP + CBC.
 
-Variables de decisión (enteras ≥ 0):
-  x1 = pantalon_diario   utilidad = 20 000 COP
-  x2 = camisa_diario     utilidad = 15 000 COP
-  x3 = pantalon_ef       utilidad = 12 000 COP
-  x4 = sueter_ef         utilidad = 11 000 COP
+Las variables de decisión son DINÁMICAS: se construyen desde las prendas
+del colegio seleccionado en uniforme_insumos. No hay lista fija.
 
-Los coeficientes de insumo se leen dinámicamente desde uniforme_insumos.
-Los stocks se leen desde insumos.
-La demanda máxima se calcula desde pedidos activos.
+  Maximizar Z = Σ(utilidad_i · x_i)  para cada prenda del colegio
+  Sujeto a:
+    Σ(coef_ij · x_i) ≤ stock_j   para cada insumo j  (stock global compartido)
+    x_i ≤ demanda_i               si incluir_demanda=True
+    x_i ≥ 0, enteras
 """
 
 import logging
+import re
+import unicodedata
 from typing import NamedTuple
 
 from pulp import LpMaximize, LpProblem, LpStatus, LpVariable, lpSum, value
 from pulp import PULP_CBC_CMD
 
 from config import settings
-from database import obtener_coeficientes, obtener_demanda_uniforme, obtener_stocks_insumos
+from database import obtener_coeficientes, obtener_demanda_uniforme, obtener_stocks_insumos, obtener_uniformes_sin_receta
 from schemas import (
     DemandaInfo,
+    DetallePrenda,
     ParametrosOptimizacion,
-    PlanProduccion,
     RecursoInfo,
     ResultadoOptimizacion,
 )
@@ -31,97 +32,102 @@ from schemas import (
 
 class OptimizadorOutput(NamedTuple):
     resultado: ResultadoOptimizacion
-    coef_matrix: dict   # {variable: {insumo: coef}}
-    stocks: dict        # {insumo: stock_disponible}
+    coef_matrix: dict    # {var_key: {ins_key: coef}}
+    stocks: dict         # {ins_key: stock_disponible}
+    var_labels: dict     # {var_key: "Pantalón Diario"} — etiquetas para gráficas
+    insumo_labels: dict  # {ins_key: "Tela Lacoste Blanca"} — etiquetas para gráficas
+
 
 logger = logging.getLogger(__name__)
 
-# Utilidades por defecto en COP (del modelo matemático del spec)
+# Utilidades por defecto en COP. Se busca por slug, luego por clave canónica.
 UTILIDADES_DEFAULT: dict[str, float] = {
-    "pantalon_diario": 20_000,
-    "camisa_diario":   15_000,
-    "sueter_diario":   13_000,
-    "pantalon_ef":     12_000,
-    "sueter_ef":       11_000,
+    "pantalon_diario":            20_000,
+    "camisa_diario":              15_000,
+    "sueter_diario":              13_000,
+    "pantalon_ef":                12_000,
+    "sueter_ef":                  11_000,
+    "pantalon_educacion_fisica":  12_000,
+    "sueter_educacion_fisica":    11_000,
+    "camisa_educacion_fisica":    13_000,
+    "blusa_diario":               15_000,
+    "bata_diario":                14_000,
+    "falda_diario":               13_000,
 }
 
-# Variables del modelo ILP — una por tipo de prenda
-VARIABLES_ILP = ["pantalon_diario", "camisa_diario", "sueter_diario", "pantalon_ef", "sueter_ef"]
-
-# Coeficientes de respaldo cuando no hay datos en DB (solo desarrollo)
 COEF_FALLBACK: dict[str, dict[str, float]] = {
-    "pantalon_diario": {"drill": 1.5,  "hilo": 2.0,  "botones": 1.0},
+    "pantalon_diario": {"drill": 1.5,    "hilo": 2.0, "botones": 1.0},
     "camisa_diario":   {"popelina": 1.2, "hilo": 1.5, "botones": 5.0},
-    "sueter_diario":   {"drill": 1.0,  "hilo": 3.0,  "botones": 3.0},
-    "pantalon_ef":     {"licra": 0.8,  "hilo": 1.0},
-    "sueter_ef":       {"licra": 0.6,  "hilo": 0.5},
+    "sueter_diario":   {"drill": 1.0,    "hilo": 3.0, "botones": 3.0},
+    "pantalon_ef":     {"licra": 0.8,    "hilo": 1.0},
+    "sueter_ef":       {"licra": 0.6,    "hilo": 0.5},
 }
 
 
-def _identificar_variable(prenda: str, tipo: str) -> str | None:
-    """Mapea (prenda, tipo) del DB a una variable del modelo ILP."""
+def _slugify(text: str) -> str:
+    """'Pantalón Educación Física' → 'pantalon_educacion_fisica'"""
+    text = unicodedata.normalize("NFKD", str(text)).encode("ascii", "ignore").decode()
+    text = re.sub(r"[^\w\s]", "", text.lower())
+    return re.sub(r"\s+", "_", text.strip())
+
+
+def _make_var_key(prenda: str, tipo: str, genero: str | None = None) -> str:
+    base = f"{_slugify(prenda)}_{_slugify(tipo)}"
+    g = _slugify(genero or "")
+    return f"{base}_{g}" if g and g != "unisex" else base
+
+
+def _make_label(prenda: str, tipo: str, genero: str | None = None) -> str:
+    base = f"{prenda.strip()} {tipo.strip()}"
+    g = (genero or "").strip()
+    return f"{base} — {g.title()}" if g and g.lower() != "unisex" else base
+
+
+def _identificar_variable_canonica(prenda: str, tipo: str) -> str | None:
+    """Mapea (prenda, tipo) a clave canónica legacy para buscar en UTILIDADES_DEFAULT."""
     p = prenda.lower()
     t = (tipo or "").lower()
-
     es_pantalon = any(w in p for w in ["pantalon", "pantalón", "pant"])
     es_camisa   = any(w in p for w in ["camisa", "blusa", "camiseta"])
-    es_sueter   = any(w in p for w in ["sueter", "suéter", "sweater", "buzo", "sudadera", "chompa"])
-    es_diario   = "diario" in t or "uniforme" in t
-    es_ef       = any(w in t for w in ["educacion", "educación", "fisica", "física", " ef", "ef"])
-
+    es_sueter   = any(w in p for w in ["sueter", "suéter", "sweater", "buzo", "sudadera"])
+    es_ef       = any(w in t for w in ["educacion", "educación", "fisica", "física", "ef"])
     if es_pantalon:
-        if es_ef:
-            return "pantalon_ef"
-        return "pantalon_diario"
+        return "pantalon_ef" if es_ef else "pantalon_diario"
     if es_camisa:
-        if es_ef:
-            return None            # no existe camisa_ef en el modelo
-        return "camisa_diario"
+        return None if es_ef else "camisa_diario"
     if es_sueter:
-        if es_ef:
-            return "sueter_ef"
-        if es_diario:
-            return "sueter_diario"
-        return "sueter_ef"         # default para suéter sin tipo explícito
+        return "sueter_ef" if es_ef else "sueter_diario"
     return None
 
 
+def _get_utilidad(prenda: str, tipo: str, utilidades: dict[str, float]) -> float:
+    """Busca utilidad por slug → canónica → 10 000 COP default."""
+    slug = _make_var_key(prenda, tipo)
+    if slug in utilidades:
+        return utilidades[slug]
+    canon = _identificar_variable_canonica(prenda, tipo)
+    if canon and canon in utilidades:
+        return utilidades[canon]
+    return 10_000
+
+
 def _identificar_insumo(nombre: str) -> str | None:
-    """
-    Mapea el nombre del insumo (desde DB) a la clave canónica del modelo ILP.
-    Usa el nombre en minúsculas para hacer el match case-insensitive.
-    Si el insumo no se reconoce se retorna None y se ignora (no afecta el modelo).
-    """
     n = nombre.lower()
-    # Telas
-    if "drill" in n:
-        return "drill"
-    if "popelina" in n or "popeline" in n:
-        return "popelina"
-    if "licra" in n or "lycra" in n or "spandex" in n:
-        return "licra"
-    if "entretela" in n or "termofusible" in n or "fusible" in n:
-        return "entretela"
-    if "tela" in n and "lana" in n:
-        return "lana"
-    # Mercería
-    if "hilo" in n or "thread" in n:
-        return "hilo"
-    if "boton" in n or "botón" in n or "button" in n:
-        return "botones"
-    if "cierre" in n or "cremallera" in n or "zipper" in n:
-        return "cierres"
-    if "elástic" in n or "elastic" in n:
-        return "elastico"
-    if "cinta" in n or "ribbon" in n:
-        return "cinta"
-    if "etiqueta" in n or "label" in n:
-        return "etiquetas"
+    if "drill" in n:                                         return "drill"
+    if "popelina" in n or "popeline" in n:                  return "popelina"
+    if "licra" in n or "lycra" in n or "spandex" in n:      return "licra"
+    if "entretela" in n or "termofusible" in n:              return "entretela"
+    if "tela" in n and "lana" in n:                         return "lana"
+    if "hilo" in n or "thread" in n:                        return "hilo"
+    if "boton" in n or "botón" in n or "button" in n:       return "botones"
+    if "cierre" in n or "cremallera" in n or "zipper" in n: return "cierres"
+    if "elástic" in n or "elastic" in n:                    return "elastico"
+    if "cinta" in n or "ribbon" in n:                       return "cinta"
+    if "etiqueta" in n or "label" in n:                     return "etiquetas"
     return None
 
 
 def _abreviar_unidad(u: str) -> str:
-    """Normaliza la unidad de medida a una etiqueta corta (≤4 chars)."""
     u = u.strip().lower()
     if u in ("metros", "metro", "m", "mts"):          return "mtr"
     if u in ("unidades", "unidad", "und", "u", "un"): return "un"
@@ -130,34 +136,67 @@ def _abreviar_unidad(u: str) -> str:
     if u in ("litros", "litro", "lt", "l"):            return "ltr"
     if u in ("rollos", "rollo"):                       return "rol"
     if u in ("yardas", "yarda", "yrd", "yd"):          return "yrd"
-    return u[:4] if u else "un"   # fallback: truncar o "un"
+    return u[:4] if u else "un"
 
 
 def resolver_optimizacion(params: ParametrosOptimizacion) -> OptimizadorOutput:
-    utilidades = {**UTILIDADES_DEFAULT, **(params.utilidades or {})}
+    utilidades_map = {**UTILIDADES_DEFAULT, **(params.utilidades or {})}
+
     coef_matrix: dict[str, dict[str, float]] = {}
     stocks: dict[str, float] = {}
-    units:  dict[str, str]   = {}   # {insumo_key: unidad_medida}
+    units:  dict[str, str]   = {}
+    var_labels:    dict[str, str]   = {}   # var_key  → "Pantalón Diario — Masculino"
+    var_utilidad:  dict[str, float] = {}   # var_key  → COP
+    var_generos:   dict[str, str]   = {}   # var_key  → "Masculino"
+    insumo_labels: dict[str, str]   = {}   # ins_key  → "Tela Lacoste Blanca"
+
+    def _infeasible(msg: str) -> OptimizadorOutput:
+        return OptimizadorOutput(
+            resultado=ResultadoOptimizacion(
+                estado="INFEASIBLE",
+                utilidad_total=0,
+                plan={},
+                recursos={},
+                demanda={},
+                mensaje=msg,
+                colegio_id=params.colegio_id,
+            ),
+            coef_matrix={},
+            stocks={},
+            var_labels={},
+            insumo_labels={},
+        )
 
     try:
-        # ── 1. Cargar coeficientes y stocks desde DB ──────────────────────
-        df_coef = obtener_coeficientes()
+        # ── 1. Coeficientes del colegio ───────────────────────────────────────
+        df_coef = obtener_coeficientes(params.colegio_id)
 
-        # Acumuladores para calcular promedio ponderado si el mismo par (var, ins)
-        # aparece más de una vez (distintos uniforme_id mapeados a la misma variable).
         coef_acum: dict[str, dict[str, list[float]]] = {}
 
         for _, row in df_coef.iterrows():
-            var = _identificar_variable(str(row["prenda"]), str(row["tipo"]))
-            ins = _identificar_insumo(str(row["insumo_nombre"]))
-            if var and ins:
-                coef_acum.setdefault(var, {}).setdefault(ins, []).append(float(row["cantidad_base"]))
-                # El stock del insumo es único en DB; max() elimina duplicados de filas
-                stocks[ins] = max(stocks.get(ins, 0), float(row["stock_actual"]))
-                if ins not in units:
-                    units[ins] = _abreviar_unidad(str(row.get("unidad_medida") or ""))
+            prenda = str(row["prenda"])
+            tipo   = str(row["tipo"])
+            genero = str(row["genero"]) if row.get("genero") else ""
+            var    = _make_var_key(prenda, tipo, genero)
 
-        # Promedio de cada coeficiente — determinístico e independiente del ORDER BY
+            # Clave única del insumo: "ins_{id}" — nunca se descarta ningún insumo
+            # sin importar cómo se llame en la base de datos.
+            ins_id  = int(row["insumo_id"])
+            ins_key = f"ins_{ins_id}"
+            # Nombre legible para las gráficas
+            nombre_raw = str(row["insumo_nombre"])   # viene en minúsculas de la query
+            ins_label  = nombre_raw.title()           # "tela lacoste blanca" → "Tela Lacoste Blanca"
+
+            coef_acum.setdefault(var, {}).setdefault(ins_key, []).append(float(row["cantidad_base"]))
+            stocks[ins_key] = max(stocks.get(ins_key, 0), float(row["stock_actual"]))
+            if ins_key not in units:
+                units[ins_key]         = _abreviar_unidad(str(row.get("unidad_medida") or ""))
+                insumo_labels[ins_key] = ins_label
+            if var not in var_labels:
+                var_labels[var]   = _make_label(prenda, tipo, genero)
+                var_utilidad[var] = _get_utilidad(prenda, tipo, utilidades_map)
+                var_generos[var]  = genero.strip().title() if genero.strip() else ""
+
         coef_matrix = {
             var: {ins: sum(vals) / len(vals) for ins, vals in insumos.items()}
             for var, insumos in coef_acum.items()
@@ -166,103 +205,80 @@ def resolver_optimizacion(params: ParametrosOptimizacion) -> OptimizadorOutput:
         usando_fallback = False
         if not coef_matrix:
             if settings.ENVIRONMENT == "production":
-                raise ValueError(
-                    "No hay coeficientes de insumo configurados en uniforme_insumos. "
-                    "Configure las recetas de producción antes de ejecutar la optimización."
+                return _infeasible(
+                    f"El colegio id={params.colegio_id} no tiene recetas de insumos configuradas. "
+                    "Configure las recetas en Uniformes → Insumos antes de ejecutar la optimización."
                 )
-            # Solo en desarrollo/staging: usar valores del spec como referencia
-            logger.warning("Sin coeficientes en DB — usando COEF_FALLBACK (solo válido fuera de producción)")
-            coef_matrix = COEF_FALLBACK
+            logger.warning("Colegio %d sin coeficientes — usando COEF_FALLBACK", params.colegio_id)
+            coef_matrix  = COEF_FALLBACK
+            var_labels   = {k: k.replace("_", " ").title() for k in COEF_FALLBACK}
+            var_utilidad = {k: utilidades_map.get(k, 10_000) for k in COEF_FALLBACK}
             usando_fallback = True
-            # Leer stocks reales desde insumos aunque no haya uniforme_insumos
             df_stocks = obtener_stocks_insumos()
             for _, row in df_stocks.iterrows():
                 ins = _identificar_insumo(str(row["nombre_lower"]))
                 if ins:
                     stocks[ins] = max(stocks.get(ins, 0), float(row["stock"]))
                     if ins not in units:
-                        units[ins] = _abreviar_unidad(str(row.get("unidad_medida") or ""))
+                        units[ins]         = _abreviar_unidad(str(row.get("unidad_medida") or ""))
+                        insumo_labels[ins] = str(row["nombre_lower"]).title()
 
-        # ── 2. Demanda desde pedidos activos ──────────────────────────────
+        var_keys = list(coef_matrix.keys())
+
+        # ── 2. Demanda del colegio ────────────────────────────────────────────
         demanda_db: dict[str, int] = {}
         if params.incluir_demanda:
-            df_dem = obtener_demanda_uniforme()
+            df_dem = obtener_demanda_uniforme(params.colegio_id)
             for _, row in df_dem.iterrows():
-                var = _identificar_variable(str(row["prenda"]), str(row["tipo"]))
-                if var:
+                var = _make_var_key(str(row["prenda"]), str(row["tipo"]), str(row.get("genero") or ""))
+                if var in coef_matrix:
                     qty = int(row["cantidad_demandada"])
-                    demanda_db[var] = demanda_db.get(var, 0) + qty
+                    if qty > 0:   # ignorar prendas sin pedidos activos
+                        demanda_db[var] = demanda_db.get(var, 0) + qty
 
-        # ── 3. Definir el modelo ILP ──────────────────────────────────────
+        # ── 3. Modelo ILP ─────────────────────────────────────────────────────
         prob = LpProblem("optimizacion_produccion_costusoft", LpMaximize)
 
         x: dict[str, LpVariable] = {
-            v: LpVariable(v, lowBound=0, cat="Integer") for v in VARIABLES_ILP
+            v: LpVariable(v, lowBound=0, cat="Integer") for v in var_keys
         }
 
-        # Función objetivo: Max Z = sum(utilidad_i * x_i)
-        prob += lpSum(utilidades.get(v, 0) * x[v] for v in VARIABLES_ILP), "utilidad_total"
+        # Función objetivo: Max Σ(utilidad_i · x_i)
+        prob += lpSum(var_utilidad.get(v, 10_000) * x[v] for v in var_keys), "utilidad_total"
 
-        # Variables sin receta configurada → fijadas a 0 para evitar UNBOUNDED
-        variables_con_receta = set(coef_matrix.keys())
-        for v in VARIABLES_ILP:
-            if v not in variables_con_receta:
-                prob += x[v] == 0, f"sin_receta_{v}"
-                logger.debug("Variable '%s' fijada a 0 — sin receta de insumos configurada", v)
-
-        # Restricciones de insumos (R1-R5 del spec)
+        # Restricciones de stock (insumos globales del taller)
         all_insumos = {ins for coefs in coef_matrix.values() for ins in coefs}
         restricciones_stock = []
         for ins in all_insumos:
             stock_disponible = stocks.get(ins, 0)
             if stock_disponible > 0:
-                expr = lpSum(coef_matrix.get(v, {}).get(ins, 0) * x[v] for v in VARIABLES_ILP)
+                expr = lpSum(coef_matrix.get(v, {}).get(ins, 0) * x[v] for v in var_keys)
                 prob += expr <= stock_disponible, f"stock_{ins}"
                 restricciones_stock.append(ins)
 
-        # Guardia: sin restricciones de stock el problema es INFEASIBLE por datos
         if not restricciones_stock:
-            logger.warning(
-                "Ningún insumo tiene stock > 0 — no se puede resolver la optimización."
-            )
-            return OptimizadorOutput(
-                resultado=ResultadoOptimizacion(
-                    estado="INFEASIBLE",
-                    utilidad_total=0,
-                    plan=PlanProduccion(),
-                    recursos={},
-                    demanda={},
-                    mensaje=(
-                        "No hay stock disponible en los insumos configurados. "
-                        "Registre insumos con stock > 0 y configure las recetas "
-                        "en Uniformes → Insumos para ejecutar la optimización."
-                    ),
-                ),
-                coef_matrix=coef_matrix,
-                stocks=stocks,
+            return _infeasible(
+                "Ningún insumo tiene stock > 0. Registre insumos y configure las recetas."
             )
 
-        # Restricciones de demanda (R6a-R6d del spec)
+        # Restricciones de demanda del colegio
         for var, dem in demanda_db.items():
             if dem > 0 and var in x:
                 prob += x[var] <= dem, f"demanda_{var}"
 
-        # ── 4. Resolver con CBC ───────────────────────────────────────────
+        # ── 4. Resolver con CBC ───────────────────────────────────────────────
         solver = PULP_CBC_CMD(msg=0)
         prob.solve(solver)
         estado = LpStatus[prob.status]
 
         if estado == "Optimal":
-            plan = {v: int(value(x[v]) or 0) for v in VARIABLES_ILP}
+            plan = {v: int(value(x[v]) or 0) for v in var_keys}
             utilidad_total = float(value(prob.objective) or 0)
 
             recursos: dict[str, RecursoInfo] = {}
             for ins in all_insumos:
                 if ins in stocks:
-                    usado = sum(
-                        coef_matrix.get(v, {}).get(ins, 0) * plan.get(v, 0)
-                        for v in VARIABLES_ILP
-                    )
+                    usado = sum(coef_matrix.get(v, {}).get(ins, 0) * plan.get(v, 0) for v in var_keys)
                     disponible = stocks[ins]
                     recursos[ins] = RecursoInfo(
                         usado=round(usado, 3),
@@ -272,40 +288,121 @@ def resolver_optimizacion(params: ParametrosOptimizacion) -> OptimizadorOutput:
                         unidad_medida=units.get(ins, ""),
                     )
 
+            # Detalle por prenda: binding insumo y motivo para las que quedan en 0
+            detalle_plan: dict[str, DetallePrenda] = {}
+            for v in var_keys:
+                cant = plan.get(v, 0)
+                min_add: float = float("inf")
+                binding_ins: str | None = None
+                binding_coef: float = 0.0
+                for ins, coef in coef_matrix.get(v, {}).items():
+                    if coef > 0 and ins in stocks:
+                        usado_total = sum(
+                            coef_matrix.get(w, {}).get(ins, 0) * plan.get(w, 0)
+                            for w in var_keys
+                        )
+                        additional = (stocks[ins] - usado_total) / coef
+                        if additional < min_add:
+                            min_add = additional
+                            binding_ins = ins
+                            binding_coef = coef
+
+                max_prod = int(max(0, min_add)) if min_add != float("inf") else 0
+                ins_nombre = insumo_labels.get(binding_ins, binding_ins) if binding_ins else None
+                utilidad_prenda = var_utilidad.get(v, 10_000)
+                eficiencia = round(utilidad_prenda / binding_coef, 2) if binding_coef > 0 else None
+
+                if cant > 0:
+                    motivo = "Incluida en el plan óptimo"
+                elif binding_ins is None:
+                    motivo = "Sin insumos configurados"
+                elif min_add < 1:
+                    motivo = f"Stock agotado de: {ins_nombre}"
+                else:
+                    motivo = "Recursos asignados a prendas de mayor utilidad"
+
+                detalle_plan[v] = DetallePrenda(
+                    cantidad=cant,
+                    max_producible=max_prod,
+                    genero=var_generos.get(v) or None,
+                    insumo_limitante_key=binding_ins,
+                    insumo_limitante_nombre=ins_nombre,
+                    coef_insumo_limitante=round(binding_coef, 4) if binding_coef > 0 else None,
+                    eficiencia_cop_por_unidad=eficiencia,
+                    motivo=motivo,
+                )
+
+            # Solo mostrar demanda donde hay pedidos activos reales
             demanda_resultado = {
                 v: DemandaInfo(solicitado=plan.get(v, 0), demanda_maxima=dem)
                 for v, dem in demanda_db.items()
+                if dem > 0
             }
 
-            nota_fallback = " (coeficientes del spec — sin datos en DB)" if usando_fallback else ""
-            resultado = ResultadoOptimizacion(
-                estado="OPTIMAL",
-                utilidad_total=round(utilidad_total, 2),
-                plan=PlanProduccion(**plan),
-                recursos=recursos,
-                demanda=demanda_resultado,
-                mensaje=f"Solución óptima encontrada{nota_fallback}. Utilidad máxima: ${utilidad_total:,.0f} COP",
-            )
-            return OptimizadorOutput(resultado=resultado, coef_matrix=coef_matrix, stocks=stocks)
+            # Advertencia si hay prendas del colegio sin receta configurada
+            sin_receta = obtener_uniformes_sin_receta(params.colegio_id)
+            nota_sin_receta = (
+                f" ⚠ {len(sin_receta)} prenda(s) excluida(s) por falta de receta de insumos: "
+                + ", ".join(sin_receta[:5])
+                + ("…" if len(sin_receta) > 5 else "")
+                + ". Configura sus insumos en el módulo Uniformes."
+            ) if sin_receta else ""
 
-        resultado = ResultadoOptimizacion(
-            estado=estado.upper(),
-            utilidad_total=0,
-            plan=PlanProduccion(),
-            recursos={},
-            demanda={},
-            mensaje=f"El solver no encontró solución óptima. Estado: {estado}. Verifique stocks y restricciones.",
+            nota_dem = " Sin pedidos activos — sin restricción de demanda." if not demanda_db else ""
+            nota_fb  = " (coeficientes de ejemplo)" if usando_fallback else ""
+
+            return OptimizadorOutput(
+                resultado=ResultadoOptimizacion(
+                    estado="OPTIMAL",
+                    utilidad_total=round(utilidad_total, 2),
+                    plan=plan,
+                    recursos=recursos,
+                    demanda=demanda_resultado,
+                    insumo_labels=insumo_labels,
+                    detalle_plan=detalle_plan,
+                    mensaje=(
+                        f"Solución óptima{nota_fb}. "
+                        f"Utilidad máxima: ${utilidad_total:,.0f} COP."
+                        f"{nota_dem}{nota_sin_receta}"
+                    ),
+                    colegio_id=params.colegio_id,
+                ),
+                coef_matrix=coef_matrix,
+                stocks=stocks,
+                var_labels=var_labels,
+                insumo_labels=insumo_labels,
+            )
+
+        return OptimizadorOutput(
+            resultado=ResultadoOptimizacion(
+                estado=estado.upper(),
+                utilidad_total=0,
+                plan={v: 0 for v in var_keys},
+                recursos={},
+                demanda={},
+                mensaje=f"El solver no encontró solución óptima. Estado: {estado}.",
+                colegio_id=params.colegio_id,
+            ),
+            coef_matrix=coef_matrix,
+            stocks=stocks,
+            var_labels=var_labels,
+            insumo_labels=insumo_labels,
         )
-        return OptimizadorOutput(resultado=resultado, coef_matrix=coef_matrix, stocks=stocks)
 
     except Exception as exc:
         logger.error("Error en optimización ILP: %s", exc, exc_info=True)
-        resultado = ResultadoOptimizacion(
-            estado="ERROR",
-            utilidad_total=0,
-            plan=PlanProduccion(),
-            recursos={},
-            demanda={},
-            mensaje=f"Error interno al resolver el modelo: {exc}",
+        return OptimizadorOutput(
+            resultado=ResultadoOptimizacion(
+                estado="ERROR",
+                utilidad_total=0,
+                plan={},
+                recursos={},
+                demanda={},
+                mensaje=f"Error interno al resolver el modelo: {exc}",
+                colegio_id=params.colegio_id,
+            ),
+            coef_matrix={},
+            stocks={},
+            var_labels={},
+            insumo_labels={},
         )
-        return OptimizadorOutput(resultado=resultado, coef_matrix={}, stocks={})

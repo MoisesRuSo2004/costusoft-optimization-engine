@@ -4,20 +4,13 @@ from datetime import datetime
 
 
 class ParametrosOptimizacion(BaseModel):
-    incluir_demanda: bool = Field(default=True, description="Aplica restricciones de demanda desde pedidos activos (suma todas las tallas)")
+    colegio_id: int = Field(description="ID del colegio a optimizar")
+    incluir_demanda: bool = Field(default=True, description="Aplica restricciones de demanda desde pedidos activos")
     utilidades: Optional[dict[str, float]] = Field(
         default=None,
-        description="Override de utilidades por prenda en COP. Defaults: pantalon_diario=20000, camisa_diario=15000, pantalon_ef=12000, sueter_ef=11000"
+        description="Override de utilidades por prenda en COP. Claves: slug de prenda_tipo o nombre canónico."
     )
     ejecutado_por: Optional[str] = Field(default=None)
-
-
-class PlanProduccion(BaseModel):
-    pantalon_diario: int = 0
-    camisa_diario: int = 0
-    sueter_diario: int = 0
-    pantalon_ef: int = 0
-    sueter_ef: int = 0
 
 
 class RecursoInfo(BaseModel):
@@ -33,13 +26,28 @@ class DemandaInfo(BaseModel):
     demanda_maxima: int
 
 
+class DetallePrenda(BaseModel):
+    cantidad: int
+    max_producible: int
+    genero: Optional[str] = None
+    insumo_limitante_key: Optional[str] = None
+    insumo_limitante_nombre: Optional[str] = None
+    coef_insumo_limitante: Optional[float] = None
+    eficiencia_cop_por_unidad: Optional[float] = None
+    motivo: str
+
+
 class ResultadoOptimizacion(BaseModel):
     id: Optional[int] = None
+    colegio_id: Optional[int] = None
+    nombre_colegio: Optional[str] = None
     estado: str  # OPTIMAL | INFEASIBLE | UNBOUNDED | ERROR
     utilidad_total: float
-    plan: PlanProduccion
+    plan: dict[str, int]                       # {var_key: cantidad} — dinámico por colegio
     recursos: dict[str, RecursoInfo]
     demanda: dict[str, DemandaInfo]
+    insumo_labels: dict[str, str] = {}         # {ins_key: "Tela Lacoste Blanca"}
+    detalle_plan: dict[str, DetallePrenda] = {} # {var_key: DetallePrenda}
     mensaje: str
     grafica_html: Optional[str] = None
     grafica_region_html: Optional[str] = None
