@@ -233,8 +233,9 @@ def resolver_optimizacion(params: ParametrosOptimizacion) -> OptimizadorOutput:
                 var = _make_var_key(str(row["prenda"]), str(row["tipo"]), str(row.get("genero") or ""))
                 if var in coef_matrix:
                     qty = int(row["cantidad_demandada"])
-                    if qty > 0:   # ignorar prendas sin pedidos activos
-                        demanda_db[var] = demanda_db.get(var, 0) + qty
+                    # Incluir también qty=0: la prenda existe en el catálogo pero sin pedidos activos
+                    # → el modelo recibirá x[var] <= 0, bloqueando su producción
+                    demanda_db[var] = demanda_db.get(var, 0) + qty
 
         # ── 3. Modelo ILP ─────────────────────────────────────────────────────
         prob = LpProblem("optimizacion_produccion_costusoft", LpMaximize)
@@ -261,9 +262,9 @@ def resolver_optimizacion(params: ParametrosOptimizacion) -> OptimizadorOutput:
                 "Ningún insumo tiene stock > 0. Registre insumos y configure las recetas."
             )
 
-        # Restricciones de demanda del colegio
+        # Restricciones de demanda del colegio (incluye dem=0 → bloquea producción sin pedido)
         for var, dem in demanda_db.items():
-            if dem > 0 and var in x:
+            if var in x:
                 prob += x[var] <= dem, f"demanda_{var}"
 
         # ── 4. Resolver con CBC ───────────────────────────────────────────────
@@ -348,7 +349,8 @@ def resolver_optimizacion(params: ParametrosOptimizacion) -> OptimizadorOutput:
                 + ". Configura sus insumos en el módulo Uniformes."
             ) if sin_receta else ""
 
-            nota_dem = " Sin pedidos activos — sin restricción de demanda." if not demanda_db else ""
+            hay_demanda_activa = any(d > 0 for d in demanda_db.values())
+            nota_dem = " Sin pedidos activos — producción bloqueada por demanda." if (demanda_db and not hay_demanda_activa) else ""
             nota_fb  = " (coeficientes de ejemplo)" if usando_fallback else ""
 
             return OptimizadorOutput(
