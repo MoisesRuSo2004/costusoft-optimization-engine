@@ -128,12 +128,15 @@ def obtener_demanda_uniforme(colegio_id: int) -> pd.DataFrame:
             u.prenda,
             u.tipo,
             u.genero,
-            COALESCE(SUM(dp.cantidad), 0) AS cantidad_demandada
+            COALESCE(SUM(activos.cantidad), 0) AS cantidad_demandada
         FROM uniformes u
-        LEFT JOIN detalle_pedidos dp ON dp.uniforme_id = u.id
-        LEFT JOIN pedidos p ON dp.pedido_id = p.id
-            AND p.estado IN ('BORRADOR', 'CALCULADO', 'CONFIRMADO', 'EN_PRODUCCION')
-            AND p.colegio_id = :colegio_id
+        LEFT JOIN (
+            SELECT dp.uniforme_id, dp.cantidad
+            FROM detalle_pedidos dp
+            INNER JOIN pedidos p ON p.id = dp.pedido_id
+            WHERE p.estado IN ('BORRADOR', 'CALCULADO', 'CONFIRMADO', 'EN_PRODUCCION')
+              AND p.colegio_id = :colegio_id
+        ) activos ON activos.uniforme_id = u.id
         WHERE u.colegio_id = :colegio_id
         GROUP BY u.prenda, u.tipo, u.genero
         ORDER BY u.prenda
