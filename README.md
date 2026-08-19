@@ -55,3 +55,5 @@ uvicorn main:app --reload --port 8002
 2. Seleccionar **Docker** como runtime
 3. Configurar las variables de entorno
 4. Deploy — el `Dockerfile` maneja el resto
+
+Dev - Moises Ruiz
